@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/fusecraft-core", "crates/fusecraft-fuser", "crates/fusecraft-cli"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+license = "MIT"
+repository = "https://github.com/ahrav/fusecraft-rs"
+readme = "README.md"
+
+[workspace.dependencies]
+libc = "0.2"
+parking_lot = "0.12"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+hdrhistogram = "7"
+serde_json = "1"
+toml = "1"
+tracing = "0.1"
