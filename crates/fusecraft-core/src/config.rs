@@ -371,9 +371,9 @@ fn validate_op_policy(policy: &OpPolicy, prefix: &str) -> Result<(), FsError> {
     validate_latency(&policy.latency, prefix)?;
 
     for (i, fault) in policy.faults.iter().enumerate() {
-        if fault.rate < 0.0 || fault.rate > 1.0 {
+        if !fault.rate.is_finite() || fault.rate < 0.0 || fault.rate > 1.0 {
             return Err(FsError::Config(format!(
-                "{prefix}.faults[{i}].rate must be in [0.0, 1.0], got {}",
+                "{prefix}.faults[{i}].rate must be a finite value in [0.0, 1.0], got {}",
                 fault.rate
             )));
         }
@@ -383,6 +383,22 @@ fn validate_op_policy(policy: &OpPolicy, prefix: &str) -> Result<(), FsError> {
 }
 
 fn validate_latency(latency: &LatencyProfile, prefix: &str) -> Result<(), FsError> {
+    // Reject non-finite floats (NaN, ±inf) up front — comparison-only checks
+    // below would otherwise silently let NaN pass.
+    for (name, value) in [
+        ("lognormal_median_us", latency.lognormal_median_us),
+        ("lognormal_sigma", latency.lognormal_sigma),
+        ("pareto_weight", latency.pareto_weight),
+        ("pareto_xm_us", latency.pareto_xm_us),
+        ("pareto_alpha", latency.pareto_alpha),
+    ] {
+        if !value.is_finite() {
+            return Err(FsError::Config(format!(
+                "{prefix}.latency.{name} must be finite, got {value}"
+            )));
+        }
+    }
+
     if latency.max_us < latency.base_us {
         return Err(FsError::Config(format!(
             "{prefix}.latency.max_us ({}) must be >= base_us ({})",

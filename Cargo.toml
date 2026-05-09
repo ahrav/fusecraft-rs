@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.87"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/ahrav/fusecraft-rs"
 readme = "README.md"
 

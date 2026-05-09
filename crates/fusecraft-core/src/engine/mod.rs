@@ -121,12 +121,15 @@ impl SimEngine {
         let queue_wait_us = guard.queue_wait.as_micros() as u64;
 
         // 2. Deterministic per-call sampling.
+        //    FUSE requests are bounded by kernel limits (typically ≤ 1 MiB),
+        //    but clamp explicitly so the truncation from `usize` to `u32` is
+        //    intentional rather than implicit if a caller ever exceeds u32.
         let key = SampleKey {
             seed: self.seed,
             op: ctx.op,
             ino: ctx.ino,
             offset: ctx.offset,
-            len: ctx.len as u32,
+            len: ctx.len.min(u32::MAX as usize) as u32,
             seq,
         };
         let fault_errno = sample_fault(&resources.policy.faults, key);

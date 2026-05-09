@@ -85,16 +85,26 @@ impl BandwidthLimiter {
     /// This method **does not sleep** — the caller is responsible for sleeping
     /// or otherwise delaying.
     pub fn reserve(&self, bytes: u64) -> Duration {
+        // Zero-byte reservations are a true no-op: never touch state, never
+        // delay (even if the bucket is currently in debt from earlier callers).
+        if bytes == 0 {
+            return Duration::ZERO;
+        }
+
+        let mut state = self.state.lock();
+        // Account bytes up front so unlimited-rate profiles still report
+        // throughput in `stats()`. `saturating_add` avoids wraparound on
+        // pathological workloads that reserve more than u64::MAX cumulatively.
+        state.total_bytes_reserved = state.total_bytes_reserved.saturating_add(bytes);
+
         // Guard: if rate is non-positive, no throttling possible.
         if self.rate <= 0.0 {
             return Duration::ZERO;
         }
 
-        let mut state = self.state.lock();
         self.refill(&mut state);
 
         let needed = bytes as f64;
-        state.total_bytes_reserved += bytes;
 
         // Subtract tokens; may go negative.
         state.tokens -= needed;
@@ -105,7 +115,10 @@ impl BandwidthLimiter {
             state.total_throttled += 1;
             let deficit = -state.tokens;
             let wait_secs = deficit / self.rate;
-            Duration::from_secs_f64(wait_secs)
+            // `try_from_secs_f64` avoids a panic for a pathologically small
+            // positive rate combined with a very large deficit (which would
+            // overflow `Duration`). Saturate to `Duration::MAX` instead.
+            Duration::try_from_secs_f64(wait_secs).unwrap_or(Duration::MAX)
         }
     }
 
