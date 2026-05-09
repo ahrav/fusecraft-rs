@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fusecraft-core",
+    "crates/fusecraft-fuser",
+    "crates/fusecraft-cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AhravDutta/fusecraft-rs"
+
+[workspace.dependencies]
+fusecraft-core = { path = "crates/fusecraft-core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "2"
+rand = "0.8"

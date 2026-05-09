@@ -1,0 +1,13 @@
+[package]
+name = "fusecraft-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core simulator library for fusecraft-rs: latency, fault, concurrency, and bandwidth injection"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
