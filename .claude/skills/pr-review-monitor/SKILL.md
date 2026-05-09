@@ -24,35 +24,48 @@ Invoke with: `/pr-review-monitor <PR-number>`
 
 ## Phase 2: Foreground Poll Loop
 
-Run the loop **in the foreground as the main process**. No background
-daemons, no nohup, no PID files. The agent IS the poller.
+`poll_pr.sh` runs as a **long-lived background poller** that writes state
+to files under `/tmp`. The agent drives a foreground loop that drains
+those files each iteration. No extra daemons, no nohup, no PID files —
+the agent is still the consumer and decision-maker.
 
-```
+```text
 watermark = <from Phase 1>
+launch    : .claude/skills/pr-review-monitor/scripts/poll_pr.sh <owner/repo> <PR> <watermark> 65 &
 
 loop:
     1. sleep 65
-    2. output = call poll_pr.sh <owner/repo> <PR> <watermark>
-    3. Parse STATE line → if MERGED or CLOSED: exit
-    4. Parse COMMENT lines → if none: goto 1
-    5. Filter out bot acknowledgments
-    6. Triage + verify-first + fix + reply for substantive comments
-    7. Parse WATERMARK line → update watermark
-    8. Goto 1
+    2. state = read /tmp/pr_<repo_key>_<pr>_state
+    3. if state == MERGED or CLOSED: exit
+    4. atomically rename pending.jsonl → pending.jsonl.inflight, read, delete
+    5. if no new comments: goto 1
+    6. Filter out bot acknowledgments
+    7. Triage + verify-first + fix + reply for substantive comments
+    8. watermark = read /tmp/pr_<repo_key>_<pr>_watermark
+    9. Goto 1
 ```
 
 ### poll_pr.sh
 
-Helper that fetches state and new comments in one call:
+Long-running poller. Invoke once with the starting watermark and leave it
+in the background:
 
 ```bash
-output=$(.claude/skills/pr-review-monitor/scripts/poll_pr.sh owner/repo 123 "$watermark")
+.claude/skills/pr-review-monitor/scripts/poll_pr.sh owner/repo 123 "$watermark" 65 &
 ```
 
-Prints to stdout:
-- `STATE OPEN` / `MERGED` / `CLOSED`
-- `COMMENT {json}` — one per new comment
-- `WATERMARK <iso8601>` — pass back next call
+Writes (all scoped by `REPO_KEY=owner_repo` + PR number):
+
+- `/tmp/pr_<repo_key>_<pr>_state` — `OPEN` / `MERGED` / `CLOSED`
+- `/tmp/pr_<repo_key>_<pr>_pending.jsonl` — one JSON object per new
+  comment (append-only between agent drains)
+- `/tmp/pr_<repo_key>_<pr>_watermark` — ISO-8601 timestamp of the newest
+  comment observed
+- `/tmp/pr_<repo_key>_<pr>_seen_ids` — dedup set (script-managed)
+- `/tmp/pr_<repo_key>_<pr>_poll.log` — human-readable log
+
+The consumer (the agent) owns the drain/reply/commit cycle; the poller
+only detects and reports.
 
 ### Bot Acknowledgments
 
@@ -83,4 +96,4 @@ gh api repos/{owner}/{repo}/issues/{pr}/comments \
 
 ## Exit
 
-When poll_pr.sh returns `STATE MERGED` or `STATE CLOSED`, stop.
+When `/tmp/pr_<repo_key>_<pr>_state` reads `MERGED` or `CLOSED`, stop.

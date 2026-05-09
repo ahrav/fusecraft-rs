@@ -38,6 +38,13 @@ PR="${2:?usage: poll_pr.sh <owner/repo> <pr-number> <watermark> [interval]}"
 WATERMARK="${3:?usage: poll_pr.sh <owner/repo> <pr-number> <watermark> [interval]}"
 INTERVAL="${4:-60}"
 
+# Validate INTERVAL — a non-numeric or non-positive value would cause `sleep`
+# to fail, and `set -e` would silently terminate the monitor.
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -le 0 ]]; then
+    echo "ERROR: interval must be a positive integer number of seconds (got: $INTERVAL)" >&2
+    exit 2
+fi
+
 # Scope file names to repo+PR so multiple monitors don't collide.
 REPO_KEY=$(printf '%s' "$REPO" | tr '/:' '__')
 PREFIX="/tmp/pr_${REPO_KEY}_${PR}"
@@ -65,10 +72,20 @@ echo "$WATERMARK" > "$WATERMARK_FILE"
 {
     gh api --paginate "repos/$REPO/pulls/$PR/comments" 2>/dev/null \
         | jq -s 'add // []' \
-        | jq -r --arg wm "$WATERMARK" '.[] | select(.created_at <= $wm) | .id'
+        | jq -r --arg wm "$WATERMARK" '
+            ($wm | fromdateiso8601) as $wm_epoch
+            | .[]
+            | select((.created_at | fromdateiso8601) <= $wm_epoch)
+            | .id
+          '
     gh api --paginate "repos/$REPO/issues/$PR/comments" 2>/dev/null \
         | jq -s 'add // []' \
-        | jq -r --arg wm "$WATERMARK" '.[] | select(.created_at <= $wm) | .id'
+        | jq -r --arg wm "$WATERMARK" '
+            ($wm | fromdateiso8601) as $wm_epoch
+            | .[]
+            | select((.created_at | fromdateiso8601) <= $wm_epoch)
+            | .id
+          '
 } >> "$SEEN_IDS_FILE" 2>/dev/null || true
 
 seeded=$(wc -l < "$SEEN_IDS_FILE" 2>/dev/null | tr -d ' ')
