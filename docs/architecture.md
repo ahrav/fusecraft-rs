@@ -14,7 +14,7 @@ All simulation logic lives in `fusecraft-core`. The FUSE adapter and CLI are thi
 
 Every filesystem operation flows through a single function:
 
-```
+```text
 crates/fusecraft-core/src/engine/mod.rs :: SimEngine::run_op
 ```
 

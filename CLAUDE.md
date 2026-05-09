@@ -20,9 +20,9 @@ cargo test -p fusecraft-core engine::tests::zero_latency_runs_closure_and_return
 ## Architecture
 
 ### Workspace layout
-- `fusecraft-core` — the simulator engine and all policy/sampling/metrics logic. **All real code lives here today.**
-- `fusecraft-fuser` — FUSE kernel adapter (stub; implementation deferred).
-- `fusecraft-cli` — binary entry point (stub; `fn main() {}`).
+- `fusecraft-core` — the simulator engine and all policy/sampling/metrics logic.
+- `fusecraft-fuser` — FUSE kernel adapter (`FaultFs<N, C>` impl of `fuser::Filesystem`, `mount`/`spawn_mount` helpers).
+- `fusecraft-cli` — binary entry point exposing `mount`, `validate-config`, and `print-default-config` subcommands.
 
 ### The central abstraction: `SimEngine::run_op`
 Everything flows through one function: `crates/fusecraft-core/src/engine/mod.rs::SimEngine::run_op`. Future FUSE handlers call it with an `OpContext` and a closure that produces the "real" reply. The engine wraps that closure with a fixed 7-step lifecycle:

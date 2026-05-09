@@ -70,12 +70,13 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let ctx = OpContext::metadata(FsOp::Lookup, parent.0);
         let ns = Arc::clone(&self.namespace);
-        let name = name.to_owned();
         let ttl = self.entry_ttl;
 
+        // `run_op` invokes the closure synchronously on the calling thread, so
+        // we can borrow `name` directly without an `OsString` allocation.
         match self.engine.run_op(ctx, move || {
             let ino = ns
-                .lookup(parent.0, &name)
+                .lookup(parent.0, name)
                 .ok_or(fusecraft_core::error::FsError::Errno(libc::ENOENT))?;
             let spec = ns
                 .attr(ino)
@@ -128,15 +129,23 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
         reply: ReplyData,
     ) {
         let content = Arc::clone(&self.content);
-        let len = size as usize;
-        let ctx = OpContext::data(FsOp::Read, ino.0, offset, len);
+        // Clamp the request to the bytes actually readable so the engine sees
+        // the true byte count: `ctx.len` feeds bandwidth throttling, the
+        // sampler key, and event/metric payloads, and short tail reads should
+        // not be charged as full-size reads.
+        let requested = size as usize;
+        let file_len = content.file_len(ino.0);
+        let readable = if offset >= file_len {
+            0
+        } else {
+            ((file_len - offset) as usize).min(requested)
+        };
+        let ctx = OpContext::data(FsOp::Read, ino.0, offset, readable);
 
         match self.engine.run_op(ctx, move || {
-            let file_len = content.file_len(ino.0);
-            if offset >= file_len {
+            if readable == 0 {
                 return Ok(Vec::new());
             }
-            let readable = ((file_len - offset) as usize).min(len);
             let mut buf = vec![0u8; readable];
             content.read_at(ino.0, offset, &mut buf);
             Ok(buf)
@@ -160,13 +169,12 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
     ) {
         let content = Arc::clone(&self.content);
         let data_len = data.len();
-        let data_owned = data.to_vec();
         let ctx = OpContext::data(FsOp::Write, ino.0, offset, data_len);
 
+        // `run_op` calls the closure synchronously, so the &[u8] borrow from
+        // the kernel request is valid for the closure's lifetime — no copy.
         match self.engine.run_op(ctx, move || {
-            content
-                .write_at(ino.0, offset, &data_owned)
-                .map(|n| n as u32)
+            content.write_at(ino.0, offset, data).map(|n| n as u32)
         }) {
             Ok(written) => reply.written(written),
             Err(e) => reply.error(errno_to_fuser(e.as_errno())),

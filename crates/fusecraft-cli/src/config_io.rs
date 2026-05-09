@@ -77,7 +77,16 @@ mod tests {
 
     #[test]
     fn load_config_rejects_missing_file() {
-        let err = load_config(Path::new("/tmp/fusecraft-does-not-exist.toml")).unwrap_err();
+        // Build a guaranteed-nonexistent path inside the temp dir so the
+        // test doesn't false-fail on hosts that happen to have a file at
+        // a fixed /tmp path.
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let missing = std::env::temp_dir().join(format!(
+            "fusecraft-cli-missing-{}-{}.toml",
+            std::process::id(),
+            id,
+        ));
+        let err = load_config(&missing).unwrap_err();
         assert!(
             format!("{err:?}").contains("read config file"),
             "error should mention reading: {err:?}"

@@ -13,7 +13,7 @@ Use it to test application behavior when file operations block, fail, or queue.
 cargo build --workspace
 
 # Mount with an example config
-fusecraft --config examples/read_heavy.toml /mnt/sim
+fusecraft mount --config examples/read_heavy.toml --mountpoint /mnt/sim
 
 # Run your workload against the mount point
 dd if=/mnt/sim/objects/000001 of=/dev/null bs=64k

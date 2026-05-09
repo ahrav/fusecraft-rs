@@ -49,8 +49,9 @@ pub fn tempdir() -> tempfile::TempDir {
 /// Build a default `Config` suitable for integration tests.
 ///
 /// Uses minimal settings for fast test execution: 10 inodes, 4 KiB files, zero
-/// latency injection, no faults, and `auto_unmount` enabled so the kernel
-/// releases the mount even if a test panics.
+/// latency injection, and no faults. `auto_unmount` is disabled because it
+/// requires `allow_other` (and usually `user_allow_other` in /etc/fuse.conf);
+/// tests rely on drop-based unmount via `MountHandle` instead.
 pub fn default_test_config() -> Config {
     let zero_latency = OpPolicy {
         concurrency_cap: 8,
@@ -113,11 +114,38 @@ pub fn mount_test_fs(config: &Config) -> (MountHandle, tempfile::TempDir) {
     let fs = FaultFs::new(engine, namespace, content);
     let opts = FuserMountOptions::from_mount_config(&config.mount);
     let handle = spawn_mount(fs, mount_dir.path(), &opts).expect("spawn_mount");
-    // Give the kernel a moment to finish the mount handshake before tests
-    // start poking at the mount point. Without this, racing reads sometimes
-    // see the empty underlying tempdir instead of the mounted filesystem.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Poll the mount point until the kernel publishes the mounted filesystem:
+    // without a real wait, races let the test read the empty underlying
+    // tempdir instead of the mount. A fixed sleep would also be flaky on
+    // slow CI hosts, so we poll for the `objects` entry that the
+    // `FlatObjectNamespace` guarantees at root.
+    wait_for_mount(mount_dir.path());
     (handle, mount_dir)
+}
+
+/// Poll until the FUSE mount point reports an `objects` child, or give up
+/// after a bounded timeout so tests fail fast with a useful message instead
+/// of silently racing the kernel.
+fn wait_for_mount(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let ready = std::fs::read_dir(path)
+            .ok()
+            .map(|it| {
+                it.filter_map(Result::ok)
+                    .any(|e| e.file_name() == "objects")
+            })
+            .unwrap_or(false);
+        if ready {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "FUSE mount at {} did not become ready within timeout",
+            path.display(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Return the path to the workspace root (two levels above fusecraft-fuser).

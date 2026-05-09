@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result, bail};
-use tracing::info;
+use tracing::{info, warn};
 
 use fusecraft_core::content::DeterministicContent;
 use fusecraft_core::engine::SimEngine;
@@ -59,6 +59,17 @@ pub fn run(config_path: &Path, mountpoint: &Path) -> Result<()> {
     let fs = FaultFs::new(Arc::clone(&engine), namespace, content);
     let mount_opts = FuserMountOptions::from_mount_config(&config.mount);
 
+    // `auto_unmount` is only honored by fusermount when `allow_other` is also
+    // enabled. We don't currently expose `allow_other` in the CLI/config, so
+    // surface the silent downgrade explicitly rather than letting users
+    // assume the option took effect.
+    if config.mount.auto_unmount {
+        warn!(
+            "mount.auto_unmount=true is configured but requires allow_other, which is not \
+             currently exposed; relying on drop-based unmount instead"
+        );
+    }
+
     let handle = spawn_mount(fs, mountpoint, &mount_opts)
         .map_err(|e| anyhow::anyhow!("failed to mount: {e}"))?;
 
@@ -94,5 +105,8 @@ fn init_tracing() {
     use tracing_subscriber::fmt;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).init();
+    // `try_init` is safe to call when a global subscriber is already set
+    // (e.g. test harness, library embedding): it just returns an error we
+    // can ignore instead of panicking.
+    let _ = fmt().with_env_filter(filter).try_init();
 }
