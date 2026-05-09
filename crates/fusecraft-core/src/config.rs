@@ -1,336 +1,414 @@
 //! Configuration types and TOML parsing for fusecraft-rs.
-//!
-//! The simulator is configured via a TOML file that specifies latency
-//! distributions, fault injection rules, concurrency limits, and bandwidth
-//! throttling per operation kind.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::error::ConfigError;
-use crate::op::OpKind;
+use crate::error::FsError;
+use crate::op::FsOp;
 
 /// Top-level simulator configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// Global defaults applied to all operations unless overridden.
+    /// RNG seed for reproducibility.
+    #[serde(default = "default_seed")]
+    pub seed: u64,
+    /// FUSE mount options.
     #[serde(default)]
-    pub defaults: OpConfig,
-
-    /// Per-operation overrides keyed by operation kind.
+    pub mount: MountConfig,
+    /// Virtual filesystem file layout.
     #[serde(default)]
-    pub ops: HashMap<OpKind, OpConfig>,
-
-    /// Concurrency limiting configuration.
+    pub files: FilesConfig,
+    /// Per-operation policies.
     #[serde(default)]
-    pub concurrency: ConcurrencyConfig,
-
-    /// Bandwidth throttling configuration.
+    pub ops: HashMap<FsOp, OpPolicy>,
+    /// Metrics/telemetry configuration.
     #[serde(default)]
-    pub bandwidth: BandwidthConfig,
-
-    /// Namespace (virtual filesystem tree) configuration.
-    #[serde(default)]
-    pub namespace: NamespaceConfig,
+    pub metrics: MetricsConfig,
 }
 
-/// Per-operation configuration: latency injection and fault injection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpConfig {
-    /// Latency injection settings.
+/// FUSE mount configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MountConfig {
+    /// Filesystem name reported to the kernel.
+    #[serde(default = "default_fs_name")]
+    pub fs_name: String,
+    /// Filesystem subtype.
+    #[serde(default = "default_subtype")]
+    pub subtype: String,
+    /// Whether to auto-unmount on process exit.
+    #[serde(default = "default_true")]
+    pub auto_unmount: bool,
+    /// Whether to enable default_permissions checking.
+    #[serde(default = "default_true")]
+    pub default_permissions: bool,
+    /// Mount as read-only.
     #[serde(default)]
-    pub latency: Option<LatencyConfig>,
-
-    /// Fault injection settings.
+    pub read_only: bool,
+    /// Enable direct I/O (bypass page cache).
     #[serde(default)]
-    pub fault: Option<FaultConfig>,
+    pub direct_io: bool,
 }
 
-/// Latency injection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LatencyConfig {
-    /// The distribution to sample latency from.
-    pub distribution: DistributionConfig,
+/// Virtual filesystem layout configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilesConfig {
+    /// Number of inodes to pre-create.
+    #[serde(default = "default_inode_count")]
+    pub inode_count: u64,
+    /// Default file size in bytes.
+    #[serde(default = "default_file_size_bytes")]
+    pub file_size_bytes: u64,
+    /// Root directory layout strategy.
+    #[serde(default)]
+    pub root_layout: RootLayout,
+    /// How writes are handled.
+    #[serde(default)]
+    pub write_mode: WriteMode,
 }
 
-/// A probability distribution for sampling durations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DistributionConfig {
-    /// Fixed constant latency.
-    Constant {
-        /// Duration in milliseconds.
-        value_ms: u64,
-    },
-    /// Uniform distribution between min and max.
-    Uniform {
-        /// Minimum duration in milliseconds.
-        min_ms: u64,
-        /// Maximum duration in milliseconds.
-        max_ms: u64,
-    },
-    /// Normal (Gaussian) distribution.
-    Normal {
-        /// Mean in milliseconds.
-        mean_ms: f64,
-        /// Standard deviation in milliseconds.
-        stddev_ms: f64,
-    },
-    /// Pareto distribution for heavy-tailed latency.
-    Pareto {
-        /// Scale parameter (minimum value) in milliseconds.
-        scale_ms: f64,
-        /// Shape parameter (alpha).
-        shape: f64,
-    },
+/// Root directory layout strategy.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RootLayout {
+    /// All files in a single flat directory.
+    #[default]
+    Flat,
 }
 
-/// Fault injection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FaultConfig {
-    /// Probability of injecting a fault (0.0 to 1.0).
-    pub probability: f64,
+/// Write handling mode.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteMode {
+    /// Discard written data immediately.
+    #[default]
+    Discard,
+    /// Store written data in memory.
+    InMemory,
+}
 
-    /// The errno value to return when a fault is injected.
+/// Per-operation policy: concurrency, latency, bandwidth, faults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpPolicy {
+    /// Maximum concurrent in-flight operations of this type.
+    #[serde(default = "default_concurrency_cap")]
+    pub concurrency_cap: usize,
+    /// Maximum queued operations waiting for a concurrency slot.
+    #[serde(default)]
+    pub queue_cap: usize,
+    /// Latency injection profile.
+    #[serde(default)]
+    pub latency: LatencyProfile,
+    /// Optional bandwidth throttling.
+    #[serde(default)]
+    pub bandwidth: Option<BandwidthProfile>,
+    /// Fault injection rules.
+    #[serde(default)]
+    pub faults: Vec<FaultRule>,
+}
+
+/// Latency injection profile.
+///
+/// The model is: base + lognormal body + pareto tail, clamped to max.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LatencyProfile {
+    /// Fixed base latency in microseconds.
+    #[serde(default)]
+    pub base_us: u64,
+    /// Median of the lognormal component (microseconds).
+    #[serde(default = "default_lognormal_median")]
+    pub lognormal_median_us: f64,
+    /// Sigma (shape) of the lognormal component.
+    #[serde(default = "default_lognormal_sigma")]
+    pub lognormal_sigma: f64,
+    /// Weight of the Pareto tail component (0.0 to 1.0).
+    #[serde(default)]
+    pub pareto_weight: f64,
+    /// Scale (xm) of the Pareto distribution (microseconds).
+    #[serde(default = "default_pareto_xm")]
+    pub pareto_xm_us: f64,
+    /// Shape (alpha) of the Pareto distribution.
+    #[serde(default = "default_pareto_alpha")]
+    pub pareto_alpha: f64,
+    /// Maximum latency clamp in microseconds.
+    #[serde(default = "default_max_us")]
+    pub max_us: u64,
+}
+
+/// Bandwidth throttling profile.
+#[derive(Clone, Debug, Serialize)]
+pub struct BandwidthProfile {
+    /// Sustained bandwidth in bytes per second.
+    pub bytes_per_sec: f64,
+    /// Burst allowance in bytes.
+    pub burst_bytes: u64,
+}
+
+/// Intermediate struct for TOML deserialization of BandwidthProfile.
+/// The TOML uses `mib_per_sec` which we convert to `bytes_per_sec`.
+#[derive(Deserialize)]
+struct BandwidthProfileRaw {
+    mib_per_sec: f64,
+    burst_bytes: u64,
+}
+
+impl<'de> Deserialize<'de> for BandwidthProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = BandwidthProfileRaw::deserialize(deserializer)?;
+        Ok(BandwidthProfile {
+            bytes_per_sec: raw.mib_per_sec * 1024.0 * 1024.0,
+            burst_bytes: raw.burst_bytes,
+        })
+    }
+}
+
+/// A fault injection rule.
+#[derive(Clone, Debug, Serialize)]
+pub struct FaultRule {
+    /// Which operation this rule targets.
+    pub op: FsOp,
+    /// The errno to inject.
     pub errno: i32,
+    /// Probability of triggering this fault (0.0 to 1.0).
+    pub rate: f64,
 }
 
-/// Concurrency limiting configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConcurrencyConfig {
-    /// Maximum number of concurrent in-flight operations (0 = unlimited).
-    #[serde(default)]
-    pub max_concurrent: u32,
-
-    /// Per-operation concurrency limits.
-    #[serde(default)]
-    pub per_op: HashMap<OpKind, u32>,
+/// Intermediate struct for TOML deserialization of FaultRule.
+/// Errno is specified as a string name (e.g. "EIO").
+#[derive(Deserialize)]
+struct FaultRuleRaw {
+    op: FsOp,
+    errno: String,
+    rate: f64,
 }
 
-impl Default for ConcurrencyConfig {
+impl<'de> Deserialize<'de> for FaultRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = FaultRuleRaw::deserialize(deserializer)?;
+        let errno = parse_errno(&raw.errno).map_err(serde::de::Error::custom)?;
+        Ok(FaultRule {
+            op: raw.op,
+            errno,
+            rate: raw.rate,
+        })
+    }
+}
+
+/// Metrics/telemetry configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    /// Path to write JSON-lines event log.
+    #[serde(default)]
+    pub jsonl_path: Option<PathBuf>,
+}
+
+// --- Defaults ---
+
+fn default_seed() -> u64 {
+    42
+}
+
+fn default_fs_name() -> String {
+    "fusecraft".into()
+}
+
+fn default_subtype() -> String {
+    "sim".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_inode_count() -> u64 {
+    1000
+}
+
+fn default_file_size_bytes() -> u64 {
+    65536
+}
+
+fn default_concurrency_cap() -> usize {
+    64
+}
+
+fn default_lognormal_median() -> f64 {
+    100.0
+}
+
+fn default_lognormal_sigma() -> f64 {
+    0.5
+}
+
+fn default_pareto_xm() -> f64 {
+    1000.0
+}
+
+fn default_pareto_alpha() -> f64 {
+    1.5
+}
+
+fn default_max_us() -> u64 {
+    1_000_000
+}
+
+// --- Default impls ---
+
+impl Default for Config {
     fn default() -> Self {
         Self {
-            max_concurrent: 0,
-            per_op: HashMap::new(),
+            seed: default_seed(),
+            mount: MountConfig::default(),
+            files: FilesConfig::default(),
+            ops: HashMap::new(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
 
-/// Bandwidth throttling configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BandwidthConfig {
-    /// Maximum read bandwidth in bytes per second (0 = unlimited).
-    #[serde(default)]
-    pub read_bps: u64,
-
-    /// Maximum write bandwidth in bytes per second (0 = unlimited).
-    #[serde(default)]
-    pub write_bps: u64,
-}
-
-impl Default for BandwidthConfig {
+impl Default for MountConfig {
     fn default() -> Self {
         Self {
-            read_bps: 0,
-            write_bps: 0,
+            fs_name: default_fs_name(),
+            subtype: default_subtype(),
+            auto_unmount: true,
+            default_permissions: true,
+            read_only: false,
+            direct_io: false,
         }
     }
 }
 
-/// Virtual filesystem namespace configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NamespaceConfig {
-    /// Number of files to pre-populate in the virtual tree.
-    #[serde(default = "default_file_count")]
-    pub file_count: u64,
-
-    /// Number of directories to pre-populate.
-    #[serde(default = "default_dir_count")]
-    pub dir_count: u64,
-
-    /// Maximum depth of the directory tree.
-    #[serde(default = "default_max_depth")]
-    pub max_depth: u32,
-
-    /// Default file size in bytes for synthetic content.
-    #[serde(default = "default_file_size")]
-    pub file_size: u64,
-}
-
-fn default_file_count() -> u64 {
-    100
-}
-fn default_dir_count() -> u64 {
-    10
-}
-fn default_max_depth() -> u32 {
-    4
-}
-fn default_file_size() -> u64 {
-    4096
-}
-
-impl Default for NamespaceConfig {
+impl Default for FilesConfig {
     fn default() -> Self {
         Self {
-            file_count: default_file_count(),
-            dir_count: default_dir_count(),
-            max_depth: default_max_depth(),
-            file_size: default_file_size(),
+            inode_count: default_inode_count(),
+            file_size_bytes: default_file_size_bytes(),
+            root_layout: RootLayout::default(),
+            write_mode: WriteMode::default(),
         }
     }
 }
+
+impl Default for OpPolicy {
+    fn default() -> Self {
+        Self {
+            concurrency_cap: default_concurrency_cap(),
+            queue_cap: 0,
+            latency: LatencyProfile::default(),
+            bandwidth: None,
+            faults: Vec::new(),
+        }
+    }
+}
+
+impl Default for LatencyProfile {
+    fn default() -> Self {
+        Self {
+            base_us: 0,
+            lognormal_median_us: default_lognormal_median(),
+            lognormal_sigma: default_lognormal_sigma(),
+            pareto_weight: 0.0,
+            pareto_xm_us: default_pareto_xm(),
+            pareto_alpha: default_pareto_alpha(),
+            max_us: default_max_us(),
+        }
+    }
+}
+
+// --- Errno parsing ---
+
+/// Parse an errno name string into its numeric value.
+///
+/// Supported: EIO, ENOENT, ESTALE, ENOSPC, EAGAIN, EINTR.
+pub fn parse_errno(name: &str) -> Result<i32, FsError> {
+    match name {
+        "EIO" => Ok(libc::EIO),
+        "ENOENT" => Ok(libc::ENOENT),
+        "ESTALE" => Ok(libc::ESTALE),
+        "ENOSPC" => Ok(libc::ENOSPC),
+        "EAGAIN" => Ok(libc::EAGAIN),
+        "EINTR" => Ok(libc::EINTR),
+        other => Err(FsError::Config(format!("unknown errno: {other}"))),
+    }
+}
+
+// --- Validation ---
 
 impl Config {
-    /// Parse a TOML string into a validated `Config`.
-    pub fn from_toml(toml_str: &str) -> Result<Self, ConfigError> {
-        let config: Config =
-            toml::from_str(toml_str).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Load and parse a TOML config file from the given path.
-    pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            ConfigError::Parse(format!("failed to read {}: {}", path.display(), e))
-        })?;
-        Self::from_toml(&content)
-    }
-
     /// Validate all configuration invariants.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if let Some(ref latency) = self.defaults.latency {
-            validate_latency(latency, "defaults.latency")?;
+    pub fn validate(&self) -> Result<(), FsError> {
+        if self.files.inode_count == 0 {
+            return Err(FsError::Config("files.inode_count must be > 0".into()));
         }
-        if let Some(ref fault) = self.defaults.fault {
-            validate_fault(fault, "defaults.fault")?;
-        }
-
-        for (op, op_cfg) in &self.ops {
-            let prefix = format!("ops.{op}");
-            if let Some(ref latency) = op_cfg.latency {
-                validate_latency(latency, &prefix)?;
-            }
-            if let Some(ref fault) = op_cfg.fault {
-                validate_fault(fault, &prefix)?;
-            }
+        if self.files.file_size_bytes == 0 {
+            return Err(FsError::Config("files.file_size_bytes must be > 0".into()));
         }
 
-        if self.namespace.max_depth == 0 {
-            return Err(ConfigError::Validation {
-                field: "namespace.max_depth".into(),
-                reason: "must be >= 1".into(),
-            });
+        for (op, policy) in &self.ops {
+            let prefix = format!("ops.{}", op.as_str());
+            validate_op_policy(policy, &prefix)?;
         }
 
         Ok(())
     }
-
-    /// Resolve the effective `OpConfig` for a given operation kind.
-    ///
-    /// Per-op settings override defaults.
-    pub fn resolve_op(&self, op: OpKind) -> &OpConfig {
-        self.ops.get(&op).unwrap_or(&self.defaults)
-    }
-
-    /// Returns the effective concurrency limit for an operation.
-    /// Returns `None` if unlimited.
-    pub fn concurrency_limit(&self, op: OpKind) -> Option<u32> {
-        if let Some(&limit) = self.concurrency.per_op.get(&op) {
-            if limit > 0 {
-                return Some(limit);
-            }
-        }
-        if self.concurrency.max_concurrent > 0 {
-            Some(self.concurrency.max_concurrent)
-        } else {
-            None
-        }
-    }
 }
 
-impl DistributionConfig {
-    /// Convert this distribution config to a Duration representing the mean/expected value.
-    /// Useful for display and diagnostics.
-    pub fn expected_duration(&self) -> Duration {
-        match self {
-            DistributionConfig::Constant { value_ms } => Duration::from_millis(*value_ms),
-            DistributionConfig::Uniform { min_ms, max_ms } => {
-                Duration::from_millis((min_ms + max_ms) / 2)
-            }
-            DistributionConfig::Normal { mean_ms, .. } => {
-                Duration::from_millis(*mean_ms as u64)
-            }
-            DistributionConfig::Pareto { scale_ms, shape } => {
-                if *shape > 1.0 {
-                    let mean = scale_ms * shape / (shape - 1.0);
-                    Duration::from_millis(mean as u64)
-                } else {
-                    // Mean is infinite for shape <= 1
-                    Duration::from_millis(*scale_ms as u64)
-                }
-            }
-        }
+fn validate_op_policy(policy: &OpPolicy, prefix: &str) -> Result<(), FsError> {
+    if policy.concurrency_cap == 0 {
+        return Err(FsError::Config(format!(
+            "{prefix}.concurrency_cap must be > 0"
+        )));
     }
-}
 
-fn validate_latency(latency: &LatencyConfig, prefix: &str) -> Result<(), ConfigError> {
-    match &latency.distribution {
-        DistributionConfig::Uniform { min_ms, max_ms } => {
-            if min_ms > max_ms {
-                return Err(ConfigError::Validation {
-                    field: format!("{prefix}.distribution"),
-                    reason: format!("min_ms ({min_ms}) must be <= max_ms ({max_ms})"),
-                });
-            }
+    validate_latency(&policy.latency, prefix)?;
+
+    for (i, fault) in policy.faults.iter().enumerate() {
+        if fault.rate < 0.0 || fault.rate > 1.0 {
+            return Err(FsError::Config(format!(
+                "{prefix}.faults[{i}].rate must be in [0.0, 1.0], got {}",
+                fault.rate
+            )));
         }
-        DistributionConfig::Normal { stddev_ms, .. } => {
-            if *stddev_ms < 0.0 {
-                return Err(ConfigError::Validation {
-                    field: format!("{prefix}.distribution"),
-                    reason: "stddev_ms must be >= 0".into(),
-                });
-            }
-        }
-        DistributionConfig::Pareto { scale_ms, shape } => {
-            if *scale_ms <= 0.0 {
-                return Err(ConfigError::Validation {
-                    field: format!("{prefix}.distribution"),
-                    reason: "scale_ms must be > 0".into(),
-                });
-            }
-            if *shape <= 0.0 {
-                return Err(ConfigError::Validation {
-                    field: format!("{prefix}.distribution"),
-                    reason: "shape must be > 0".into(),
-                });
-            }
-        }
-        DistributionConfig::Constant { .. } => {}
     }
+
     Ok(())
 }
 
-fn validate_fault(fault: &FaultConfig, prefix: &str) -> Result<(), ConfigError> {
-    if fault.probability < 0.0 || fault.probability > 1.0 {
-        return Err(ConfigError::Validation {
-            field: format!("{prefix}.probability"),
-            reason: format!(
-                "probability must be between 0.0 and 1.0, got {}",
-                fault.probability
-            ),
-        });
+fn validate_latency(latency: &LatencyProfile, prefix: &str) -> Result<(), FsError> {
+    if latency.max_us < latency.base_us {
+        return Err(FsError::Config(format!(
+            "{prefix}.latency.max_us ({}) must be >= base_us ({})",
+            latency.max_us, latency.base_us
+        )));
+    }
+    if latency.pareto_weight < 0.0 || latency.pareto_weight > 1.0 {
+        return Err(FsError::Config(format!(
+            "{prefix}.latency.pareto_weight must be in [0.0, 1.0], got {}",
+            latency.pareto_weight
+        )));
+    }
+    if latency.pareto_weight > 0.0 && latency.pareto_alpha <= 0.0 {
+        return Err(FsError::Config(format!(
+            "{prefix}.latency.pareto_alpha must be > 0.0 when pareto_weight > 0",
+        )));
+    }
+    if latency.lognormal_median_us < 0.0 {
+        return Err(FsError::Config(format!(
+            "{prefix}.latency.lognormal_median_us must be >= 0.0"
+        )));
+    }
+    if latency.lognormal_sigma < 0.0 {
+        return Err(FsError::Config(format!(
+            "{prefix}.latency.lognormal_sigma must be >= 0.0"
+        )));
     }
     Ok(())
 }

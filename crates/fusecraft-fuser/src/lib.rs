@@ -1,1 +1,1 @@
-// FUSE adapter — implementation deferred to a later milestone.
+//! FUSE adapter for fusecraft-rs — implementation deferred to a later milestone.
