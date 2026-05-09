@@ -1,0 +1,42 @@
+# Bandwidth throttling: simulates a throughput-constrained link.
+# Useful for testing streaming readers and upload pipelines under backpressure.
+seed = 2024
+
+[mount]
+direct_io = true
+
+[files]
+inode_count = 100
+file_size_bytes = 10485760
+root_layout = "flat"
+
+[ops.read]
+concurrency_cap = 16
+queue_cap = 32
+
+[ops.read.latency]
+base_us = 50
+lognormal_median_us = 100.0
+lognormal_sigma = 0.3
+max_us = 500000
+
+[ops.read.bandwidth]
+mib_per_sec = 10.0
+burst_bytes = 131072
+
+[ops.write]
+concurrency_cap = 8
+queue_cap = 16
+
+[ops.write.latency]
+base_us = 100
+lognormal_median_us = 200.0
+lognormal_sigma = 0.4
+max_us = 1000000
+
+[ops.write.bandwidth]
+mib_per_sec = 5.0
+burst_bytes = 65536
+
+[metrics]
+jsonl_path = "/tmp/fusecraft-bw.jsonl"

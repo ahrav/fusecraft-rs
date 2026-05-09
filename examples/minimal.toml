@@ -1,0 +1,3 @@
+# Minimal fusecraft configuration.
+# All unspecified fields use defaults (seed=42, 1000 inodes, 64 KiB files).
+seed = 1
