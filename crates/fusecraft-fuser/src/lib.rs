@@ -290,4 +290,20 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
             Err(e) => reply.error(errno_to_fuser(e.as_errno())),
         }
     }
+
+    /// Authorize `access(2)` lookups when the kernel is not handling permission
+    /// checks itself (i.e. `default_permissions=false`). Without an explicit
+    /// handler, the default `fuser::Filesystem::access` impl returns `ENOSYS`
+    /// and tools like `test -r`/`test -w` fail unexpectedly. We keep it simple
+    /// for the simulator: probe the namespace; if the inode resolves, permit
+    /// the access; otherwise surface `ENOENT`. Real permission semantics are
+    /// out of scope — users who want mode-bit enforcement should keep the
+    /// default `default_permissions=true` and let the kernel decide.
+    fn access(&self, _req: &Request, ino: INodeNo, _mask: fuser::AccessFlags, reply: ReplyEmpty) {
+        if self.namespace.attr(ino.0).is_some() {
+            reply.ok();
+        } else {
+            reply.error(errno_to_fuser(libc::ENOENT));
+        }
+    }
 }

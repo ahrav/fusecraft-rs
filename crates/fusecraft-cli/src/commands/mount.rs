@@ -38,15 +38,22 @@ pub fn run(config_path: &Path, mountpoint: &Path) -> Result<()> {
         "fusecraft starting"
     );
 
-    // Build event sink.
-    let event_sink: Arc<dyn EventSink> = match &config.metrics.jsonl_path {
-        Some(path) => {
-            let sink = JsonlEventSink::create(path)
-                .with_context(|| format!("failed to create event log: {}", path.display()))?;
-            Arc::new(sink)
-        }
-        None => Arc::new(NullEventSink),
-    };
+    // Build event sink. Keep a concrete handle to the JSONL sink (if any) so
+    // we can explicitly `flush()` it on shutdown — the `Arc<dyn EventSink>`
+    // alone isn't enough because the engine keeps another Arc alive, which
+    // would defer (and silently swallow errors from) the BufWriter drop.
+    let (event_sink, jsonl_sink): (Arc<dyn EventSink>, Option<Arc<JsonlEventSink>>) =
+        match &config.metrics.jsonl_path {
+            Some(path) => {
+                let sink =
+                    Arc::new(JsonlEventSink::create(path).with_context(|| {
+                        format!("failed to create event log: {}", path.display())
+                    })?);
+                let as_dyn: Arc<dyn EventSink> = Arc::clone(&sink) as Arc<dyn EventSink>;
+                (as_dyn, Some(sink))
+            }
+            None => (Arc::new(NullEventSink), None),
+        };
 
     // Build models and engine.
     let engine = Arc::new(SimEngine::new(&config, Arc::clone(&event_sink)));
@@ -89,12 +96,19 @@ pub fn run(config_path: &Path, mountpoint: &Path) -> Result<()> {
 
     engine.metrics().print_summary();
 
-    // Flush the JSONL sink if one was configured, to guarantee events are
-    // persisted before we return.
-    if let Some(path) = &config.metrics.jsonl_path {
-        info!(jsonl_path = %path.display(), "flushed event log");
+    // Flush the JSONL sink (if one was configured) before returning so buffered
+    // events land on disk and any I/O error surfaces to the user. Dropping the
+    // `Arc<dyn EventSink>` here is not enough: the engine still holds another
+    // Arc to the same sink, so the BufWriter wouldn't actually drop until the
+    // whole function returns and engine falls out of scope.
+    if let (Some(path), Some(sink)) = (&config.metrics.jsonl_path, &jsonl_sink) {
+        match sink.flush() {
+            Ok(()) => info!(jsonl_path = %path.display(), "flushed event log"),
+            Err(e) => warn!(jsonl_path = %path.display(), error = %e, "failed to flush event log"),
+        }
     }
     drop(event_sink);
+    drop(jsonl_sink);
 
     Ok(())
 }
