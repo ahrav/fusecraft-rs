@@ -5,15 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI binary for fusecraft-rs"
+readme.workspace = true
+description = "Command-line binary for fusecraft: mount a deterministic FUSE simulator, validate configs, and print defaults."
+keywords = ["fuse", "filesystem", "simulator", "cli", "testing"]
+categories = ["filesystem", "simulation", "command-line-utilities"]
+documentation = "https://docs.rs/fusecraft-cli"
 
 [[bin]]
 name = "fusecraft"
 path = "src/main.rs"
 
 [dependencies]
-fusecraft-core = { path = "../fusecraft-core" }
-fusecraft-fuser = { path = "../fusecraft-fuser" }
+fusecraft-core = { path = "../fusecraft-core", version = "0.1.0" }
+fusecraft-fuser = { path = "../fusecraft-fuser", version = "0.1.0" }
 
 anyhow.workspace = true
 clap.workspace = true

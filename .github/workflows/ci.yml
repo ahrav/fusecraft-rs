@@ -38,3 +38,65 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSRV 1.87)
+        uses: dtolnay/rust-toolchain@1.87.0
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build docs (deny warnings)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps
+
+  publish-dry-run:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSRV 1.87)
+        uses: dtolnay/rust-toolchain@1.87.0
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+
+      # fusecraft-core has no workspace-internal dependencies, so it is always
+      # publishable. This gate catches broken metadata (missing description,
+      # unknown category slugs, nonexistent readme paths, etc.) before release.
+      - name: Dry-run publish fusecraft-core
+        run: cargo publish --dry-run -p fusecraft-core --allow-dirty
+
+      # fusecraft-fuser depends on fusecraft-core by path+version. On a release
+      # commit before fusecraft-core has actually been published, this step
+      # will fail with "crate depends on unpublished fusecraft-core". That is
+      # expected; the step is best-effort and does not fail the job.
+      - name: Dry-run publish fusecraft-fuser
+        run: cargo publish --dry-run -p fusecraft-fuser --allow-dirty
+        continue-on-error: true
+
+      # fusecraft-cli depends on both fusecraft-core and fusecraft-fuser. Same
+      # caveat as fusecraft-fuser: this will fail until the dependencies are
+      # published for real. The step still runs to exercise manifest metadata.
+      - name: Dry-run publish fusecraft-cli
+        run: cargo publish --dry-run -p fusecraft-cli --allow-dirty
+        continue-on-error: true

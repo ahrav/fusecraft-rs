@@ -1,0 +1,175 @@
+# Zero-latency profile: useful for smoke tests and determinism assertions.
+#
+# Every operation samples a constant latency of 0 µs (no lognormal body,
+# no Pareto tail) and no faults are configured. Reads and writes still
+# participate in the full lifecycle (concurrency limiter, event log,
+# metrics histogram) — just with no injected delay or failure.
+#
+# Use this config to:
+#   - Benchmark fusecraft's own overhead.
+#   - Validate that a workload runs cleanly before enabling fault/latency.
+#   - Drive diff-based determinism tests (same seed, same event stream).
+seed = 1
+
+[mount]
+auto_unmount = false
+default_permissions = false
+read_only = false
+direct_io = false
+
+[files]
+inode_count = 64
+file_size_bytes = 4096
+root_layout = "flat"
+write_mode = "discard"
+
+# A single template policy is replicated across every op below. Every field
+# is pinned to a zero-latency configuration; the lognormal/Pareto components
+# contribute nothing because their parameters are either 0 or weighted to 0.
+# `queue_cap = 128` is generous enough that realistic parallel smoke tests
+# (32 inflight + up to 128 queued per op) do not see EAGAIN; the earlier
+# `queue_cap = 0` was a footgun for users driving bursts above the
+# concurrency cap.
+
+[ops.lookup]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.lookup.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.getattr]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.getattr.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.open]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.open.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.read]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.read.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.write]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.write.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.flush]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.flush.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.release]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.release.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.fsync]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.fsync.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.readdir]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.readdir.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.statfs]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.statfs.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0
+
+[ops.access]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.access.latency]
+base_us = 0
+lognormal_median_us = 0.0
+lognormal_sigma = 0.0
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 0

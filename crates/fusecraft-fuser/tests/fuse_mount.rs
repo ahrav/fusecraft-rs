@@ -59,7 +59,7 @@ fn read_file_returns_deterministic_content() {
     let config = common::default_test_config();
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let data = std::fs::read(&file_path).expect("read file");
     assert_eq!(data.len(), config.files.file_size_bytes as usize);
 
@@ -74,7 +74,7 @@ fn stat_file_returns_correct_size() {
     let config = common::default_test_config();
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let metadata = std::fs::metadata(&file_path).expect("stat file");
     assert_eq!(metadata.len(), config.files.file_size_bytes);
     assert!(metadata.is_file());
@@ -109,20 +109,11 @@ fn error_injection_eio_reaches_caller() {
 
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let err = std::fs::read(&file_path).expect_err("read should fail with EIO");
     assert_eq!(
         err.raw_os_error(),
         Some(libc::EIO),
         "expected EIO from injected fault, got {err:?}"
     );
-}
-
-#[test]
-#[ignore = "enabled in milestone 3 once write/fsync handlers are real"]
-fn fsync_latency_is_observed() {
-    skip_unless_fuse!();
-    // Milestone 3 will exercise fsync latency injection via a small file
-    // write + fsync, asserting the elapsed time matches the configured
-    // latency profile.
 }

@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "FUSE adapter for fusecraft-rs"
+readme.workspace = true
+description = "FUSE kernel adapter for fusecraft: bridges fuser::Filesystem to the deterministic fusecraft-core simulation engine."
+keywords = ["fuse", "filesystem", "simulator", "fuser", "testing"]
+categories = ["filesystem", "simulation", "development-tools::testing"]
+documentation = "https://docs.rs/fusecraft-fuser"
 
 [features]
 fuse-tests = []
 
 [dependencies]
-fusecraft-core = { path = "../fusecraft-core" }
+fusecraft-core = { path = "../fusecraft-core", version = "0.1.0" }
 fuser.workspace = true
 libc.workspace = true
 tracing.workspace = true

@@ -78,14 +78,17 @@ pub enum RootLayout {
 }
 
 /// Write handling mode.
+///
+/// The MVP supports only `Discard` — written bytes are accepted (so `write(2)`
+/// succeeds and reports the expected byte count) and then dropped. This
+/// preserves the determinism contract for reads, which always return bytes
+/// derived from `(ino, offset, seed)`. Additional modes may be added later.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WriteMode {
     /// Discard written data immediately.
     #[default]
     Discard,
-    /// Store written data in memory.
-    InMemory,
 }
 
 /// Per-operation policy: concurrency, latency, bandwidth, faults.

@@ -40,7 +40,7 @@ seed = 12345
 inode_count = 500
 file_size_bytes = 131072
 root_layout = "flat"
-write_mode = "inmemory"
+write_mode = "discard"
 
 [ops.read]
 concurrency_cap = 32

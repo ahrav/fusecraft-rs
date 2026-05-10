@@ -30,7 +30,7 @@ Virtual filesystem layout.
 | `inode_count` | `u64` | `1000` | Number of inodes to pre-create (must be > 0) |
 | `file_size_bytes` | `u64` | `65536` | Default file size in bytes (must be > 0) |
 | `root_layout` | `string` | `"flat"` | Root directory layout strategy |
-| `write_mode` | `string` | `"discard"` | How writes are handled: `"discard"` or `"inmemory"` |
+| `write_mode` | `string` | `"discard"` | How writes are handled |
 
 ### `root_layout` values
 
@@ -38,12 +38,11 @@ Virtual filesystem layout.
 
 ### `write_mode` values
 
-- `"discard"` — Written data is discarded immediately. Default in milestone 2.
-- `"inmemory"` — Written data is stored in memory (available for subsequent reads).
+- `"discard"` — Written data is accepted (the syscall returns the byte count) but immediately dropped. This is the only supported mode: reads always return bytes derived from `(ino, offset, seed)`, which keeps the determinism contract intact.
 
 ## `[ops.<op>]`
 
-Per-operation policy. `<op>` is one of: `lookup`, `getattr`, `open`, `read`, `write`, `flush`, `release`, `fsync`, `readdir`, `statfs`.
+Per-operation policy. `<op>` is one of: `lookup`, `getattr`, `open`, `read`, `write`, `flush`, `release`, `fsync`, `readdir`, `statfs`, `access`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

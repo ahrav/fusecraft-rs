@@ -1,0 +1,107 @@
+# Write + fsync tail-latency profile: simulates a backing store that accepts
+# writes quickly but occasionally stalls on fsync (journal flush, remote
+# replication round-trip, cache eviction, etc).
+#
+# Scenario:
+#   - Writes themselves are fast: base 100 µs + a mild lognormal body.
+#   - Fsync has a heavy Pareto tail — p99 drifts into the tens of milliseconds,
+#     with a small fraction of fsyncs landing in the hundreds of milliseconds.
+#   - Occasional fsync failures (EIO) mirror post-checksum or commit errors.
+#   - Writes are accepted but discarded; reads remain fully deterministic.
+#
+# Use this config to exercise application code that must:
+#   - Coalesce fsync calls.
+#   - Handle transient fsync errors without losing data.
+#   - Tolerate p99 write-path latency spikes without unbounded retries.
+seed = 314
+
+[mount]
+auto_unmount = false
+default_permissions = true
+read_only = false
+direct_io = false
+
+[files]
+inode_count = 200
+file_size_bytes = 262144
+root_layout = "flat"
+write_mode = "discard"
+
+[ops.open]
+concurrency_cap = 64
+queue_cap = 128
+
+[ops.open.latency]
+base_us = 50
+lognormal_median_us = 120.0
+lognormal_sigma = 0.4
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 500000
+
+[ops.write]
+concurrency_cap = 32
+queue_cap = 128
+
+[ops.write.latency]
+base_us = 100
+lognormal_median_us = 250.0
+lognormal_sigma = 0.5
+pareto_weight = 0.01
+pareto_xm_us = 5000.0
+pareto_alpha = 1.4
+max_us = 2000000
+
+[ops.write.bandwidth]
+mib_per_sec = 50.0
+burst_bytes = 524288
+
+[ops.flush]
+concurrency_cap = 32
+queue_cap = 64
+
+[ops.flush.latency]
+base_us = 20
+lognormal_median_us = 80.0
+lognormal_sigma = 0.3
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 500000
+
+[ops.fsync]
+concurrency_cap = 8
+queue_cap = 32
+
+# Heavy-tailed fsync: typical fsync lands in the 1-5 ms range but a small
+# fraction is drawn from a Pareto distribution (alpha = 1.1) that reaches
+# into the hundreds of milliseconds before being clamped at 500 ms.
+[ops.fsync.latency]
+base_us = 1000
+lognormal_median_us = 3000.0
+lognormal_sigma = 0.6
+pareto_weight = 0.05
+pareto_xm_us = 20000.0
+pareto_alpha = 1.1
+max_us = 500000
+
+[[ops.fsync.faults]]
+op = "fsync"
+errno = "EIO"
+rate = 0.002
+
+[ops.release]
+concurrency_cap = 64
+
+[ops.release.latency]
+base_us = 10
+lognormal_median_us = 40.0
+lognormal_sigma = 0.3
+pareto_weight = 0.0
+pareto_xm_us = 1.0
+pareto_alpha = 1.5
+max_us = 100000
+
+[metrics]
+jsonl_path = "/tmp/fusecraft-write-fsync-tail.jsonl"
