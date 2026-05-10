@@ -138,10 +138,15 @@ impl SimEngine {
         //
         //    Select the effective (latency, faults, bandwidth) triple based on
         //    the size tier: if this op is Read or Write, a `size_tier` is
-        //    configured, and `ctx.len` exceeds the threshold, swap in the
-        //    large-tier profile. SampleKey is unchanged — tier selection is a
-        //    policy lookup, not a sampler input, so determinism is preserved.
-        let (latency_profile, faults, bandwidth) = select_tier(resources, ctx.op, ctx.len);
+        //    configured, and `ctx.requested_len` exceeds the threshold, swap
+        //    in the large-tier profile. Routing is keyed to the caller's
+        //    originally requested size (not the possibly-clamped `ctx.len`)
+        //    so that tier selection reflects workload intent rather than
+        //    incidental file geometry (e.g. short tail reads near EOF).
+        //    SampleKey is unchanged — tier selection is a policy lookup, not
+        //    a sampler input, so determinism is preserved.
+        let (latency_profile, faults, bandwidth) =
+            select_tier(resources, ctx.op, ctx.requested_len);
 
         let key = SampleKey {
             seed: self.seed,
@@ -233,18 +238,23 @@ impl SimEngine {
 /// Returns the base-policy triple unless all three conditions hold:
 /// - `op` is `Read` or `Write`, and
 /// - `resources.policy.size_tier` is configured, and
-/// - `len` is strictly greater than `size_tier.threshold_bytes`.
+/// - `requested_len` is strictly greater than `size_tier.threshold_bytes`.
+///
+/// `requested_len` is the caller's originally requested byte count
+/// ([`OpContext::requested_len`]), not the possibly-clamped effective byte
+/// count — tier selection keys off workload intent so identical request sizes
+/// route to the same tier regardless of file geometry.
 ///
 /// Kept as a free function so it has no access to shared mutable state —
 /// matches the pure-sampler discipline used elsewhere on the hot path.
 fn select_tier(
     resources: &OpResources,
     op: FsOp,
-    len: usize,
+    requested_len: usize,
 ) -> (&LatencyProfile, &[FaultRule], Option<&BandwidthLimiter>) {
     if matches!(op, FsOp::Read | FsOp::Write) {
         if let Some(tier) = resources.policy.size_tier.as_ref() {
-            if (len as u64) > tier.threshold_bytes {
+            if (requested_len as u64) > tier.threshold_bytes {
                 return (
                     &tier.large.latency,
                     &tier.large.faults,
@@ -746,6 +756,69 @@ mod tests {
             small_wait >= Duration::from_millis(80),
             "small read should have been blocked by the large-tier op holding the \
              single limiter slot (>=80ms), got {small_wait:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_routes_on_requested_len_not_clamped_len() {
+        // A read whose effective `len` is below the threshold but whose
+        // `requested_len` is above must still route to the large tier. This
+        // mirrors the fuser read path clamping `len` to the readable tail
+        // near EOF while preserving the caller's original request size in
+        // `requested_len`.
+        //
+        // Base tier: 0us. Large tier: 50ms latency. Threshold: 1024 bytes.
+        // ctx.len = 100 (below threshold), ctx.requested_len = 10_000 (above).
+        let mut policy = zero_latency_policy();
+        policy.latency = fixed_latency_profile(0);
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(50_000),
+                bandwidth: None,
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+        let ctx = OpContext::data(FsOp::Read, 1, 0, 100).with_requested_len(10_000);
+        let before = Instant::now();
+        engine.run_op(ctx, || Ok::<_, FsError>(())).unwrap();
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "expected large-tier latency (~50ms) when requested_len exceeds \
+             threshold, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_routes_to_base_when_requested_len_at_threshold() {
+        // Boundary: ctx.requested_len equal to threshold must stay on the base
+        // tier (comparison is strict `>`). Use a large `len` that *would*
+        // route to the large tier if it were the routing key — proves routing
+        // follows `requested_len`, not `len`.
+        let mut policy = zero_latency_policy();
+        policy.latency = fixed_latency_profile(0);
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(200_000), // 200ms
+                bandwidth: None,
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+        // len = 10_000 (would route large if it were the key),
+        // requested_len = 1024 (exactly at threshold → base tier).
+        let ctx = OpContext::data(FsOp::Read, 1, 0, 10_000).with_requested_len(1024);
+        let before = Instant::now();
+        engine.run_op(ctx, || Ok::<_, FsError>(())).unwrap();
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "requested_len == threshold must use base tier, got {elapsed:?}"
         );
     }
 }

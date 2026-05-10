@@ -88,7 +88,7 @@ Fault injection rules. Multiple rules can target the same operation.
 
 ## `[ops.<op>.size_tier]`
 
-Optional size-keyed alternate policy. Only valid on `read` and `write` — validation rejects `size_tier` on metadata ops. When an op's requested length exceeds `threshold_bytes`, the engine swaps in the large-tier latency, bandwidth, and fault rules in place of the base-policy values. Requests at or below the threshold use the base policy unchanged (the comparison is strict `>`).
+Optional size-keyed alternate policy. Only valid on `read` and `write` — validation rejects `size_tier` on metadata ops. When an op's originally requested length (as supplied by the caller, not the possibly-clamped effective length — short tail reads near EOF still route by caller intent) exceeds `threshold_bytes`, the engine swaps in the large-tier latency, bandwidth, and fault rules in place of the base-policy values. Requests at or below the threshold use the base policy unchanged (the comparison is strict `>`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -156,9 +156,11 @@ A full working example lives at [`examples/size_tiered.toml`](../examples/size_t
 - `lognormal_sigma` >= 0
 - All float fields must be finite
 - `rate` in [0.0, 1.0] and finite for every fault rule
+- Each fault rule's `op` must match the enclosing `[ops.<op>]` section — a mismatch would silently never fire at runtime (the sampler filters by op) and is therefore rejected at load time
+- `mib_per_sec` must be finite for every bandwidth profile
 - `size_tier` is only permitted on `read` and `write` ops
 - `size_tier.threshold_bytes` > 0
-- All latency and fault invariants above apply to `size_tier.large.latency` and `size_tier.large.faults` as well
+- All latency, bandwidth, and fault invariants above apply to `size_tier.large` as well
 
 ## Examples
 

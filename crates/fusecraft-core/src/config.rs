@@ -419,7 +419,10 @@ fn validate_op_policy(op: FsOp, policy: &OpPolicy, prefix: &str) -> Result<(), F
     }
 
     validate_latency(&policy.latency, &format!("{prefix}.latency"))?;
-    validate_faults(&policy.faults, &format!("{prefix}.faults"))?;
+    if let Some(bw) = &policy.bandwidth {
+        validate_bandwidth(bw, &format!("{prefix}.bandwidth"))?;
+    }
+    validate_faults(&policy.faults, op, &format!("{prefix}.faults"))?;
 
     if let Some(tier) = &policy.size_tier {
         if !matches!(op, FsOp::Read | FsOp::Write) {
@@ -439,8 +442,12 @@ fn validate_op_policy(op: FsOp, policy: &OpPolicy, prefix: &str) -> Result<(), F
             &tier.large.latency,
             &format!("{prefix}.size_tier.large.latency"),
         )?;
+        if let Some(bw) = &tier.large.bandwidth {
+            validate_bandwidth(bw, &format!("{prefix}.size_tier.large.bandwidth"))?;
+        }
         validate_faults(
             &tier.large.faults,
+            op,
             &format!("{prefix}.size_tier.large.faults"),
         )?;
     }
@@ -448,14 +455,38 @@ fn validate_op_policy(op: FsOp, policy: &OpPolicy, prefix: &str) -> Result<(), F
     Ok(())
 }
 
-fn validate_faults(faults: &[FaultRule], prefix: &str) -> Result<(), FsError> {
+fn validate_faults(faults: &[FaultRule], expected_op: FsOp, prefix: &str) -> Result<(), FsError> {
     for (i, fault) in faults.iter().enumerate() {
+        if fault.op != expected_op {
+            return Err(FsError::Config(format!(
+                "{prefix}[{i}].op = \"{}\" does not match the enclosing op \"{}\" \
+                 (at runtime the sampler filters rules by op, so a mismatch would \
+                 silently never fire)",
+                fault.op.as_str(),
+                expected_op.as_str(),
+            )));
+        }
         if !fault.rate.is_finite() || fault.rate < 0.0 || fault.rate > 1.0 {
             return Err(FsError::Config(format!(
                 "{prefix}[{i}].rate must be a finite value in [0.0, 1.0], got {}",
                 fault.rate
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_bandwidth(profile: &BandwidthProfile, prefix: &str) -> Result<(), FsError> {
+    // `BandwidthLimiter::new` degrades gracefully on rate <= 0.0, but a NaN
+    // rate bypasses that guard (NaN comparisons return false) and propagates
+    // into `reserve`, where a `NaN / NaN` deficit feeds `try_from_secs_f64`
+    // and saturates to `Duration::MAX`. Reject non-finite values up front so
+    // misconfigurations surface at load time, not as a hung op.
+    if !profile.bytes_per_sec.is_finite() {
+        return Err(FsError::Config(format!(
+            "{prefix}.mib_per_sec must be finite, got {}",
+            profile.bytes_per_sec
+        )));
     }
     Ok(())
 }
@@ -661,6 +692,130 @@ mod tests {
                 assert!(
                     msg.contains("size_tier.large.faults") && msg.contains("rate"),
                     "expected size_tier fault rate error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_op_in_base_faults() {
+        // `[[ops.read.faults]]` with `op = "write"` would silently never fire
+        // at runtime because the sampler filters by op. Validation must reject
+        // the mismatch at load time.
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                faults: vec![FaultRule {
+                    op: FsOp::Write,
+                    errno: libc::EIO,
+                    rate: 0.1,
+                }],
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("ops.read.faults")
+                        && msg.contains("does not match")
+                        && msg.contains("\"write\"")
+                        && msg.contains("\"read\""),
+                    "expected op-mismatch error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_op_in_large_tier_faults() {
+        // Same check applied to `size_tier.large.faults`.
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 1024,
+                    large: LargeTierPolicy {
+                        latency: LatencyProfile::default(),
+                        bandwidth: None,
+                        faults: vec![FaultRule {
+                            op: FsOp::Write,
+                            errno: libc::EIO,
+                            rate: 0.1,
+                        }],
+                    },
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("ops.read.size_tier.large.faults")
+                        && msg.contains("does not match"),
+                    "expected size_tier op-mismatch error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_base_bandwidth() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                bandwidth: Some(BandwidthProfile {
+                    bytes_per_sec: f64::NAN,
+                    burst_bytes: 0,
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("ops.read.bandwidth") && msg.contains("finite"),
+                    "expected bandwidth finite error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_large_tier_bandwidth() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 1024,
+                    large: LargeTierPolicy {
+                        latency: LatencyProfile::default(),
+                        bandwidth: Some(BandwidthProfile {
+                            bytes_per_sec: f64::INFINITY,
+                            burst_bytes: 0,
+                        }),
+                        faults: Vec::new(),
+                    },
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("size_tier.large.bandwidth") && msg.contains("finite"),
+                    "expected size_tier bandwidth finite error, got: {msg}"
                 );
             }
             other => panic!("expected Config error, got: {other:?}"),
