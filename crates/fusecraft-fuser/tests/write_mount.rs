@@ -119,14 +119,53 @@ fn flush_and_release_complete_successfully() {
             .open(&file_path)
             .expect("open for write");
         file.write_all(b"abc").expect("write");
-        file.flush().expect("flush");
+        // NOTE: we deliberately do *not* call `file.flush()` — on Unix
+        // `<File as Write>::flush()` is a no-op (libstd returns `Ok(())`
+        // without touching the fd), so it does not drive the FUSE flush
+        // handler. The handler is exercised below when the `File` is
+        // dropped: `close(2)` causes the kernel to send FLUSH followed by
+        // RELEASE to our filesystem, so the reopen proves both paths
+        // completed without leaking state or panicking.
     }
-    // Dropping the handle above triggers release; reopening here proves the
-    // filesystem survived the release path without leaking state.
     let _reopen = OpenOptions::new()
         .read(true)
         .open(&file_path)
         .expect("reopen after release");
+}
+
+#[test]
+fn flush_latency_is_observed_on_close() {
+    skip_unless_fuse!();
+
+    // Inject latency on the FLUSH op and measure `drop(file)` — which on
+    // Unix performs `close(2)` and therefore triggers the FUSE flush
+    // handler. This is the only place in libstd that actually drives a
+    // FUSE flush, so it's the right place to pin a regression test:
+    // `<File as Write>::flush()` is a no-op on this platform.
+    let mut config = common::default_test_config();
+    let flush_policy = config.ops.get_mut(&FsOp::Flush).expect("flush policy");
+    flush_policy.latency.base_us = 50_000;
+
+    let (_handle, mount_dir) = common::mount_test_fs(&config);
+
+    let file_path = common::object_path(mount_dir.path(), 0);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&file_path)
+        .expect("open for write");
+    file.write_all(b"flush me").expect("write");
+
+    let start = std::time::Instant::now();
+    drop(file);
+    let elapsed = start.elapsed();
+
+    // Loose lower bound (40 ms against 50 ms injected) tolerates CI jitter
+    // and the fact that RELEASE runs in the same close() syscall and adds
+    // a small amount of its own wall time.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(40),
+        "expected close-triggered flush to block for ~50ms, got {elapsed:?}"
+    );
 }
 
 #[test]

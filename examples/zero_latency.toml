@@ -26,10 +26,14 @@ write_mode = "discard"
 # A single template policy is replicated across every op below. Every field
 # is pinned to a zero-latency configuration; the lognormal/Pareto components
 # contribute nothing because their parameters are either 0 or weighted to 0.
+# `queue_cap = 128` is generous enough that realistic parallel smoke tests
+# (32 inflight + up to 128 queued per op) do not see EAGAIN; the earlier
+# `queue_cap = 0` was a footgun for users driving bursts above the
+# concurrency cap.
 
 [ops.lookup]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.lookup.latency]
 base_us = 0
@@ -42,7 +46,7 @@ max_us = 0
 
 [ops.getattr]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.getattr.latency]
 base_us = 0
@@ -55,7 +59,7 @@ max_us = 0
 
 [ops.open]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.open.latency]
 base_us = 0
@@ -68,7 +72,7 @@ max_us = 0
 
 [ops.read]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.read.latency]
 base_us = 0
@@ -81,7 +85,7 @@ max_us = 0
 
 [ops.write]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.write.latency]
 base_us = 0
@@ -94,7 +98,7 @@ max_us = 0
 
 [ops.flush]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.flush.latency]
 base_us = 0
@@ -107,7 +111,7 @@ max_us = 0
 
 [ops.release]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.release.latency]
 base_us = 0
@@ -120,7 +124,7 @@ max_us = 0
 
 [ops.fsync]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.fsync.latency]
 base_us = 0
@@ -133,7 +137,7 @@ max_us = 0
 
 [ops.readdir]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.readdir.latency]
 base_us = 0
@@ -146,7 +150,7 @@ max_us = 0
 
 [ops.statfs]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.statfs.latency]
 base_us = 0
@@ -159,7 +163,7 @@ max_us = 0
 
 [ops.access]
 concurrency_cap = 32
-queue_cap = 0
+queue_cap = 128
 
 [ops.access.latency]
 base_us = 0
