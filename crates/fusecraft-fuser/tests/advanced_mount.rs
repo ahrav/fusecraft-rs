@@ -183,18 +183,22 @@ fn direct_io_mount_round_trip() {
     // Some `fusermount3` builds reject the `direct_io` mount option
     // (it is not on the userspace-accepted list on all hosts — the
     // per-file `FOPEN_DIRECT_IO` open flag is the portable path). If the
-    // mount itself fails, skip the rest of the test rather than failing
-    // the suite on an environment-specific limitation of the adapter.
+    // mount itself fails *with an error that clearly names `direct_io`*,
+    // skip the rest of the test rather than failing the suite on an
+    // environment-specific limitation of the adapter. Any other mount
+    // failure is a real regression and must fail the test — the previous
+    // catch-all `Err(_) => return` arm masked genuine adapter bugs.
     let mount_result = common::try_mount_test_fs_with_sink(
         &config,
         Arc::new(fusecraft_core::events::NullEventSink),
     );
     let (_handle, mount_dir) = match mount_result {
         Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("SKIP direct_io_mount_round_trip: mount rejected direct_io: {e:?}");
+        Err(e) if e.to_string().to_lowercase().contains("direct_io") => {
+            eprintln!("SKIP direct_io_mount_round_trip: mount rejected direct_io: {e}");
             return;
         }
+        Err(e) => panic!("unexpected mount failure for direct_io test: {e:?}"),
     };
 
     let file_path = common::object_path(mount_dir.path(), 0);
@@ -322,26 +326,34 @@ fn determinism_replay_same_seed_same_events() {
     let lines_a = common::read_jsonl_events(&path_a);
     let lines_b = common::read_jsonl_events(&path_b);
 
-    // Pair up READ events by `seq` and compare `injected_latency_us`. Other
-    // ops are excluded because metadata traversals can vary slightly by what
+    // Compare the ordered per-read `injected_latency_us` values. Other ops
+    // are excluded because metadata traversals can vary slightly by what
     // the kernel caches between runs; `Read` is the strongest determinism
     // signal because the test drives it end-to-end.
-    fn reads(lines: &[String]) -> Vec<(u64, u64)> {
+    //
+    // We deliberately drop the global `seq` counter from the comparison.
+    // `seq` is a per-engine `AtomicU64` that ticks once per op (lookup,
+    // getattr, open, read, release, …), so any run-to-run drift in how
+    // many metadata ops the kernel issues before each read would shift the
+    // Read events' `seq` values even though the injected latencies are
+    // identical. Comparing latency-only keeps the test focused on the
+    // determinism invariant (same seed + same SampleKey inputs → same
+    // sampler output) without coupling it to kernel caching heuristics.
+    fn read_latencies(lines: &[String]) -> Vec<u64> {
         lines
             .iter()
             .filter(|l| common::json_field(l, "op") == Some("read"))
             .filter_map(|l| {
-                let seq = common::json_field(l, "seq")?.parse::<u64>().ok()?;
                 let lat = common::json_field(l, "injected_latency_us")?
                     .parse::<u64>()
                     .ok()?;
-                Some((seq, lat))
+                Some(lat)
             })
             .collect()
     }
 
-    let reads_a = reads(&lines_a);
-    let reads_b = reads(&lines_b);
+    let reads_a = read_latencies(&lines_a);
+    let reads_b = read_latencies(&lines_b);
 
     assert!(!reads_a.is_empty(), "run A produced no Read events");
     assert_eq!(
@@ -353,6 +365,6 @@ fn determinism_replay_same_seed_same_events() {
     );
     assert_eq!(
         reads_a, reads_b,
-        "per-seq injected_latency_us must match across runs with the same seed"
+        "per-read injected_latency_us must match across runs with the same seed"
     );
 }

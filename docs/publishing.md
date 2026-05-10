@@ -16,7 +16,7 @@ in practice.
 
 ## Why only `fusecraft-core` supports `cargo publish --dry-run`
 
-CI dry-runs `cargo publish -p fusecraft-core` on every push, but not the other
+CI dry-runs `cargo publish --dry-run -p fusecraft-core` on every push, but not the other
 two crates. The reason: both `fusecraft-fuser` and `fusecraft-cli` depend on
 `fusecraft-core` via a combined path+version dependency, for example:
 
@@ -28,7 +28,7 @@ When packaging for publish, cargo drops the `path` and resolves the
 dependency through the registry. Before `fusecraft-core 0.1.0` has actually
 been uploaded to crates.io, the dry-run fails with:
 
-```
+```text
 error: failed to prepare local package for uploading
 
 Caused by:
