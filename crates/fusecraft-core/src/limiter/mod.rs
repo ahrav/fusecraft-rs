@@ -5,7 +5,7 @@
 //! - [`BlockingLimiter`]: A semaphore-like concurrency limiter that blocks
 //!   calling threads when the cap is reached (using `parking_lot`).
 //! - [`BandwidthLimiter`]: A token-bucket rate limiter that returns a
-//!   [`Duration`] for the caller to sleep, without blocking internally.
+//!   [`std::time::Duration`] for the caller to sleep, without blocking internally.
 //!
 //! Both types are `Send + Sync` and designed for use from real OS threads
 //! (no async runtime required).

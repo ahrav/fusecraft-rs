@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Synthetic FUSE filesystem simulator core: latency, faults, concurrency, bandwidth"
+readme.workspace = true
+description = "Deterministic simulator core for fusecraft: syscall-visible latency, faults, concurrency limits, and bandwidth throttling for FUSE filesystems."
+keywords = ["fuse", "filesystem", "simulator", "testing", "fault-injection"]
+categories = ["filesystem", "simulation", "development-tools::testing"]
+documentation = "https://docs.rs/fusecraft-core"
 
 [dependencies]
 libc.workspace = true

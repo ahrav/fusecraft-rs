@@ -1,8 +1,61 @@
-//! FUSE adapter for fusecraft-rs.
+//! # fusecraft-fuser
 //!
-//! Bridges the `fuser::Filesystem` trait to `SimEngine::run_op`, routing every
-//! FUSE request through the engine's 7-step lifecycle (concurrency limiting,
-//! fault sampling, latency injection, bandwidth throttling, event/metric recording).
+//! FUSE kernel adapter for
+//! [fusecraft-core](https://crates.io/crates/fusecraft-core). This crate
+//! supplies [`FaultFs`], a generic `fuser::Filesystem` implementation that
+//! forwards every FUSE request to [`fusecraft_core::engine::SimEngine::run_op`]
+//! so each operation participates in the standard 7-step lifecycle:
+//! concurrency limiting, fault sampling, latency injection, bandwidth
+//! throttling, and event/metric recording.
+//!
+//! ## What this crate does
+//!
+//! - Implements `fuser::Filesystem` on [`FaultFs<N, C>`] for every FUSE op
+//!   fusecraft currently models (`lookup`, `getattr`, `open`, `read`, `write`,
+//!   `flush`, `release`, `fsync`, `readdir`, `statfs`, `access`).
+//! - Routes each handler through [`fusecraft_core::engine::SimEngine::run_op`]
+//!   with a closure that produces the "real" reply (namespace lookup, content
+//!   read, etc.).
+//! - Converts [`fusecraft_core::error::FsError`] into kernel errnos through
+//!   [`fusecraft_core::error::FsError::as_errno`].
+//! - Exposes [`mount`] (foreground) and [`spawn_mount`] (background, returns a
+//!   drop-to-unmount [`MountHandle`]) helpers.
+//!
+//! ## Quick start
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use std::sync::Arc;
+//!
+//! use fusecraft_core::config::Config;
+//! use fusecraft_core::content::DeterministicContent;
+//! use fusecraft_core::engine::SimEngine;
+//! use fusecraft_core::events::NullEventSink;
+//! use fusecraft_core::namespace::FlatObjectNamespace;
+//!
+//! use fusecraft_fuser::{FaultFs, FuserMountOptions, mount};
+//!
+//! let config = Config::default();
+//! config.validate().expect("valid config");
+//!
+//! let engine = Arc::new(SimEngine::new(&config, Arc::new(NullEventSink)));
+//! let namespace = Arc::new(FlatObjectNamespace::new(&config.files));
+//! let content = Arc::new(DeterministicContent::new(
+//!     config.seed,
+//!     config.files.file_size_bytes,
+//! ));
+//!
+//! let fs = FaultFs::new(engine, namespace, content);
+//! let opts = FuserMountOptions::from_mount_config(&config.mount);
+//! mount(fs, Path::new("/mnt/sim"), &opts).expect("mount");
+//! ```
+//!
+//! ## Fidelity and non-goals
+//!
+//! fusecraft-fuser only adapts FUSE semantics to the simulator engine. It does
+//! not emulate any specific filesystem (NFS, S3, SMB, EBS, ext4, xfs, etc.).
+//! See [`fusecraft-core`](https://crates.io/crates/fusecraft-core) for the
+//! full fidelity model.
 
 mod mount;
 mod opts;
