@@ -80,23 +80,18 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
 
-      # fusecraft-core has no workspace-internal dependencies, so it is always
-      # publishable. This gate catches broken metadata (missing description,
-      # unknown category slugs, nonexistent readme paths, etc.) before release.
+      # Only fusecraft-core is dry-runnable pre-publication. It has no
+      # workspace-internal dependencies, so cargo can fully verify its manifest
+      # against crates.io. This gate catches broken metadata (missing
+      # description, unknown category slugs, nonexistent readme paths, etc.)
+      # before release.
+      #
+      # We deliberately do NOT dry-run fusecraft-fuser or fusecraft-cli here:
+      # both depend on fusecraft-core via a combined path+version dependency,
+      # and `cargo publish --dry-run` resolves the `version` through the
+      # registry rather than the workspace path. Until fusecraft-core has been
+      # published at the matching version, those dry-runs always fail with
+      # "no matching package named `fusecraft-core` found". See
+      # docs/publishing.md for the manual publish order.
       - name: Dry-run publish fusecraft-core
         run: cargo publish --dry-run -p fusecraft-core --allow-dirty
-
-      # fusecraft-fuser depends on fusecraft-core by path+version. On a release
-      # commit before fusecraft-core has actually been published, this step
-      # will fail with "crate depends on unpublished fusecraft-core". That is
-      # expected; the step is best-effort and does not fail the job.
-      - name: Dry-run publish fusecraft-fuser
-        run: cargo publish --dry-run -p fusecraft-fuser --allow-dirty
-        continue-on-error: true
-
-      # fusecraft-cli depends on both fusecraft-core and fusecraft-fuser. Same
-      # caveat as fusecraft-fuser: this will fail until the dependencies are
-      # published for real. The step still runs to exercise manifest metadata.
-      - name: Dry-run publish fusecraft-cli
-        run: cargo publish --dry-run -p fusecraft-cli --allow-dirty
-        continue-on-error: true

@@ -11,6 +11,10 @@ keywords = ["fuse", "filesystem", "simulator", "testing", "fault-injection"]
 categories = ["filesystem", "simulation", "development-tools::testing"]
 documentation = "https://docs.rs/fusecraft-core"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 libc.workspace = true
 parking_lot.workspace = true

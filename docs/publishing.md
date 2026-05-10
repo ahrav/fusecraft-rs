@@ -1,0 +1,89 @@
+# Publishing fusecraft to crates.io
+
+This document describes how to cut a release of the three fusecraft crates.
+
+## Publish order
+
+The three crates must be published in this order, and only in this order:
+
+1. `fusecraft-core`
+2. `fusecraft-fuser` (depends on `fusecraft-core`)
+3. `fusecraft-cli`   (depends on `fusecraft-core` and `fusecraft-fuser`)
+
+Each step must finish — including crates.io index propagation — before the
+next one starts. A short wait (typically 30–60s) between publishes is enough
+in practice.
+
+## Why only `fusecraft-core` supports `cargo publish --dry-run`
+
+CI dry-runs `cargo publish -p fusecraft-core` on every push, but not the other
+two crates. The reason: both `fusecraft-fuser` and `fusecraft-cli` depend on
+`fusecraft-core` via a combined path+version dependency, for example:
+
+```toml
+fusecraft-core = { path = "../fusecraft-core", version = "0.1.0" }
+```
+
+When packaging for publish, cargo drops the `path` and resolves the
+dependency through the registry. Before `fusecraft-core 0.1.0` has actually
+been uploaded to crates.io, the dry-run fails with:
+
+```
+error: failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `fusecraft-core` found
+  location searched: crates.io index
+```
+
+This is expected, not a bug in our manifests — verify locally with
+`cargo publish --dry-run -p fusecraft-fuser --allow-dirty`. The practical
+consequence is that manifest issues in `fusecraft-fuser` and `fusecraft-cli`
+surface only at real publish time, not in CI. Review their Cargo.toml
+changes carefully when bumping versions.
+
+## Version bumps
+
+All three crates move in lockstep; they currently share version `0.1.0`.
+To bump:
+
+1. Edit `version` in each of the three crate `Cargo.toml` files.
+2. Update the `version` field inside the path+version deps in
+   `crates/fusecraft-fuser/Cargo.toml` and `crates/fusecraft-cli/Cargo.toml`
+   to match.
+3. Run the verification sequence below.
+4. Commit, tag, and push. Then publish in order, waiting for the index to
+   update between crates.
+
+## Local verification before publishing
+
+Run these in order from the workspace root. All must pass:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo publish --dry-run -p fusecraft-core
+```
+
+The first three are the gates CI enforces on every push. The fourth matches
+the `docs` CI job and ensures docs.rs will build cleanly. The fifth confirms
+that `fusecraft-core`'s manifest is publish-ready — the only dry-run that is
+meaningful before the first release (see above).
+
+## Actually publishing
+
+Once verification passes, from a clean checkout on `main`:
+
+```bash
+cargo publish -p fusecraft-core
+# wait for the index to update, then:
+cargo publish -p fusecraft-fuser
+# wait again, then:
+cargo publish -p fusecraft-cli
+```
+
+If a publish fails partway through, do not retry out of order. Fix the
+failing crate, bump the patch version for that crate and any crates that
+have not yet been published, and restart from the first unpublished crate.

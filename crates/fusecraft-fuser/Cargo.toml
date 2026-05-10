@@ -11,6 +11,10 @@ keywords = ["fuse", "filesystem", "simulator", "fuser", "testing"]
 categories = ["filesystem", "simulation", "development-tools::testing"]
 documentation = "https://docs.rs/fusecraft-fuser"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 fuse-tests = []
 
