@@ -11,6 +11,7 @@ use std::io::{Seek, SeekFrom, Write};
 
 use fusecraft_core::config::FaultRule;
 use fusecraft_core::content::synth_byte;
+use fusecraft_core::namespace::FlatObjectNamespace;
 use fusecraft_core::op::FsOp;
 
 /// Skip a test early if FUSE is not available.
@@ -30,7 +31,7 @@ fn write_is_acknowledged_with_correct_length() {
     let config = common::default_test_config();
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let mut file = OpenOptions::new()
         .write(true)
         .open(&file_path)
@@ -50,7 +51,7 @@ fn write_does_not_mutate_subsequent_reads() {
     let file_size = config.files.file_size_bytes as usize;
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
 
     {
         let mut file = OpenOptions::new()
@@ -65,9 +66,9 @@ fn write_does_not_mutate_subsequent_reads() {
     let data = std::fs::read(&file_path).expect("read after write");
     assert_eq!(data.len(), file_size);
 
-    // `FlatObjectNamespace` maps file index `n` to inode `FIRST_FILE_INO + n`
-    // (currently 100). `000000` is index 0, so it lives at inode 100.
-    let file_ino = 100u64;
+    // `FlatObjectNamespace` maps file index `n` to inode `FIRST_FILE_INO + n`,
+    // so object index 0 lives at `FIRST_FILE_INO`.
+    let file_ino = FlatObjectNamespace::FIRST_FILE_INO;
     let expected: Vec<u8> = (0..file_size as u64)
         .map(|off| synth_byte(file_ino, off, seed))
         .collect();
@@ -92,7 +93,7 @@ fn write_error_injection_reaches_caller() {
 
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let mut file = OpenOptions::new()
         .write(true)
         .open(&file_path)
@@ -113,7 +114,7 @@ fn flush_and_release_complete_successfully() {
     let config = common::default_test_config();
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
 
     {
         let mut file = OpenOptions::new()
@@ -141,7 +142,7 @@ fn fsync_latency_is_observed() {
 
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let mut file = OpenOptions::new()
         .write(true)
         .open(&file_path)
@@ -168,7 +169,7 @@ fn read_only_mount_rejects_write() {
 
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
-    let file_path = mount_dir.path().join("objects").join("000000");
+    let file_path = common::object_path(mount_dir.path(), 0);
     let err = OpenOptions::new()
         .write(true)
         .open(&file_path)

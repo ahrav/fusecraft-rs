@@ -4,7 +4,7 @@
 //! test configurations, and a turnkey `mount_test_fs` that produces a live
 //! `MountHandle` on a fresh mount point.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fusecraft_core::config::{
@@ -158,4 +158,17 @@ pub fn workspace_root() -> PathBuf {
         .parent()
         .expect("workspace root")
         .to_path_buf()
+}
+
+/// Build the path to the object file at `index` inside a live mount.
+///
+/// Mirrors `FlatObjectNamespace::index_to_name`: index `n` maps to the
+/// 6-digit zero-padded file `objects/NNNNNN`. Centralising this keeps every
+/// test in sync with the layout guaranteed by `FlatObjectNamespace` and
+/// avoids five copies of `mount.join("objects").join("000000")`.
+#[allow(dead_code)]
+pub fn object_path(mount_dir: &Path, index: u64) -> PathBuf {
+    mount_dir
+        .join("objects")
+        .join(FlatObjectNamespace::index_to_name(index))
 }
