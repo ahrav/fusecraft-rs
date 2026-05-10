@@ -117,12 +117,3 @@ fn error_injection_eio_reaches_caller() {
         "expected EIO from injected fault, got {err:?}"
     );
 }
-
-#[test]
-#[ignore = "enabled in milestone 3 once write/fsync handlers are real"]
-fn fsync_latency_is_observed() {
-    skip_unless_fuse!();
-    // Milestone 3 will exercise fsync latency injection via a small file
-    // write + fsync, asserting the elapsed time matches the configured
-    // latency profile.
-}
