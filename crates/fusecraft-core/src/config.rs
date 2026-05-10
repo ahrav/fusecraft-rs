@@ -109,6 +109,52 @@ pub struct OpPolicy {
     /// Fault injection rules.
     #[serde(default)]
     pub faults: Vec<FaultRule>,
+    /// Optional size-keyed alternate profile for Read/Write.
+    ///
+    /// When an op's requested length exceeds `size_tier.threshold_bytes`, the
+    /// engine swaps in the large-tier latency/bandwidth/faults in place of the
+    /// base ones. Metadata ops (Open, Fsync, Lookup, etc.) always use the base
+    /// policy regardless of this field; validation rejects `size_tier` on
+    /// non-data ops.
+    #[serde(default)]
+    pub size_tier: Option<SizeTier>,
+}
+
+/// Size-keyed alternate profile for Read/Write ops.
+///
+/// Models workloads where small and large I/O follow different performance
+/// characteristics — e.g. grotto-rs's 128 KiB split between pre-buffered hits
+/// and NFS streaming.
+///
+/// Note: `concurrency_cap` and `queue_cap` are intentionally absent here. The
+/// engine runs a single [`crate::limiter::BlockingLimiter`] per op, and the
+/// tier split happens *after* limiter admission. Splitting concurrency across
+/// tiers would require two queues per op and break the single-queue invariant
+/// that the limiter is built on, so the large tier inherits both caps from
+/// the base policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SizeTier {
+    /// Length threshold in bytes. Requests with `len > threshold_bytes` route
+    /// to the large tier. Must be non-zero (a zero threshold is equivalent to
+    /// setting the base policy directly).
+    pub threshold_bytes: u64,
+    /// Alternate policy applied when the threshold is exceeded.
+    pub large: LargeTierPolicy,
+}
+
+/// The latency / bandwidth / fault triple that replaces the base policy when
+/// a Read/Write exceeds the [`SizeTier`] threshold.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LargeTierPolicy {
+    /// Latency profile for large ops.
+    #[serde(default)]
+    pub latency: LatencyProfile,
+    /// Optional bandwidth throttling for large ops.
+    #[serde(default)]
+    pub bandwidth: Option<BandwidthProfile>,
+    /// Fault rules for large ops.
+    #[serde(default)]
+    pub faults: Vec<FaultRule>,
 }
 
 /// Latency injection profile.
@@ -308,6 +354,7 @@ impl Default for OpPolicy {
             latency: LatencyProfile::default(),
             bandwidth: None,
             faults: Vec::new(),
+            size_tier: None,
         }
     }
 }
@@ -357,31 +404,59 @@ impl Config {
 
         for (op, policy) in &self.ops {
             let prefix = format!("ops.{}", op.as_str());
-            validate_op_policy(policy, &prefix)?;
+            validate_op_policy(*op, policy, &prefix)?;
         }
 
         Ok(())
     }
 }
 
-fn validate_op_policy(policy: &OpPolicy, prefix: &str) -> Result<(), FsError> {
+fn validate_op_policy(op: FsOp, policy: &OpPolicy, prefix: &str) -> Result<(), FsError> {
     if policy.concurrency_cap == 0 {
         return Err(FsError::Config(format!(
             "{prefix}.concurrency_cap must be > 0"
         )));
     }
 
-    validate_latency(&policy.latency, prefix)?;
+    validate_latency(&policy.latency, &format!("{prefix}.latency"))?;
+    validate_faults(&policy.faults, &format!("{prefix}.faults"))?;
 
-    for (i, fault) in policy.faults.iter().enumerate() {
+    if let Some(tier) = &policy.size_tier {
+        if !matches!(op, FsOp::Read | FsOp::Write) {
+            return Err(FsError::Config(format!(
+                "{prefix}.size_tier is only valid on Read or Write ops, not {}",
+                op.as_str()
+            )));
+        }
+        if tier.threshold_bytes == 0 {
+            return Err(FsError::Config(format!(
+                "{prefix}.size_tier.threshold_bytes must be > 0 (a zero threshold is \
+                 equivalent to not setting size_tier at all — configure the base policy \
+                 directly instead)"
+            )));
+        }
+        validate_latency(
+            &tier.large.latency,
+            &format!("{prefix}.size_tier.large.latency"),
+        )?;
+        validate_faults(
+            &tier.large.faults,
+            &format!("{prefix}.size_tier.large.faults"),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_faults(faults: &[FaultRule], prefix: &str) -> Result<(), FsError> {
+    for (i, fault) in faults.iter().enumerate() {
         if !fault.rate.is_finite() || fault.rate < 0.0 || fault.rate > 1.0 {
             return Err(FsError::Config(format!(
-                "{prefix}.faults[{i}].rate must be a finite value in [0.0, 1.0], got {}",
+                "{prefix}[{i}].rate must be a finite value in [0.0, 1.0], got {}",
                 fault.rate
             )));
         }
     }
-
     Ok(())
 }
 
@@ -397,36 +472,36 @@ fn validate_latency(latency: &LatencyProfile, prefix: &str) -> Result<(), FsErro
     ] {
         if !value.is_finite() {
             return Err(FsError::Config(format!(
-                "{prefix}.latency.{name} must be finite, got {value}"
+                "{prefix}.{name} must be finite, got {value}"
             )));
         }
     }
 
     if latency.max_us < latency.base_us {
         return Err(FsError::Config(format!(
-            "{prefix}.latency.max_us ({}) must be >= base_us ({})",
+            "{prefix}.max_us ({}) must be >= base_us ({})",
             latency.max_us, latency.base_us
         )));
     }
     if latency.pareto_weight < 0.0 || latency.pareto_weight > 1.0 {
         return Err(FsError::Config(format!(
-            "{prefix}.latency.pareto_weight must be in [0.0, 1.0], got {}",
+            "{prefix}.pareto_weight must be in [0.0, 1.0], got {}",
             latency.pareto_weight
         )));
     }
     if latency.pareto_weight > 0.0 && latency.pareto_alpha <= 0.0 {
         return Err(FsError::Config(format!(
-            "{prefix}.latency.pareto_alpha must be > 0.0 when pareto_weight > 0",
+            "{prefix}.pareto_alpha must be > 0.0 when pareto_weight > 0",
         )));
     }
     if latency.lognormal_median_us < 0.0 {
         return Err(FsError::Config(format!(
-            "{prefix}.latency.lognormal_median_us must be >= 0.0"
+            "{prefix}.lognormal_median_us must be >= 0.0"
         )));
     }
     if latency.lognormal_sigma < 0.0 {
         return Err(FsError::Config(format!(
-            "{prefix}.latency.lognormal_sigma must be >= 0.0"
+            "{prefix}.lognormal_sigma must be >= 0.0"
         )));
     }
     Ok(())

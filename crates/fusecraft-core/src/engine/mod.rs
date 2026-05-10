@@ -247,6 +247,7 @@ mod tests {
             },
             bandwidth: None,
             faults: Vec::new(),
+            size_tier: None,
         }
     }
 
