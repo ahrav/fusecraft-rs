@@ -10,8 +10,6 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use fusecraft_core::config::FaultRule;
-use fusecraft_core::content::synth_byte;
-use fusecraft_core::namespace::FlatObjectNamespace;
 use fusecraft_core::op::FsOp;
 
 /// Skip a test early if FUSE is not available.
@@ -47,11 +45,18 @@ fn write_does_not_mutate_subsequent_reads() {
     skip_unless_fuse!();
 
     let config = common::default_test_config();
-    let seed = config.seed;
     let file_size = config.files.file_size_bytes as usize;
     let (_handle, mount_dir) = common::mount_test_fs(&config);
 
     let file_path = common::object_path(mount_dir.path(), 0);
+
+    // Black-box baseline: read the file before any write to capture whatever
+    // deterministic content the engine will produce for this inode/seed. This
+    // avoids reconstructing `expected` via `synth_byte` + a hard-coded inode,
+    // so the test stays valid even if the content scheme or inode layout
+    // changes in `fusecraft-core`.
+    let before = std::fs::read(&file_path).expect("baseline read");
+    assert_eq!(before.len(), file_size);
 
     {
         let mut file = OpenOptions::new()
@@ -64,17 +69,9 @@ fn write_does_not_mutate_subsequent_reads() {
     }
 
     let data = std::fs::read(&file_path).expect("read after write");
-    assert_eq!(data.len(), file_size);
-
-    // `FlatObjectNamespace` maps file index `n` to inode `FIRST_FILE_INO + n`,
-    // so object index 0 lives at `FIRST_FILE_INO`.
-    let file_ino = FlatObjectNamespace::FIRST_FILE_INO;
-    let expected: Vec<u8> = (0..file_size as u64)
-        .map(|off| synth_byte(file_ino, off, seed))
-        .collect();
 
     assert_eq!(
-        data, expected,
+        data, before,
         "Discard write_mode must not mutate subsequent deterministic reads"
     );
 }
