@@ -67,6 +67,11 @@ pub fn default_test_config() -> Config {
         },
         bandwidth: None,
         faults: Vec::new(),
+        // Compat with Milestone 5 Stream 1: `OpPolicy` gained a `size_tier`
+        // field. Left as `None` here so the default test harness matches the
+        // pre-M5 semantics (no size-keyed tier). Tests that want to exercise
+        // the tiered behaviour overwrite this field explicitly.
+        size_tier: None,
     };
 
     let mut ops = std::collections::HashMap::new();

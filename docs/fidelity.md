@@ -43,6 +43,26 @@ fusecraft takes a different approach: it models only what your application can o
 
 These questions do not require simulating NFS lock reclamation or S3 multipart semantics. They require controllable, reproducible syscall behavior — which is exactly what fusecraft provides.
 
+## Fsync-isolated faults
+
+Every `FsOp` (`lookup`, `getattr`, `open`, `read`, `write`, `flush`, `release`, `fsync`, `readdir`, `statfs`, `access`) has its own `OpPolicy`. Fault rules declared under `[[ops.<op>.faults]]` only apply to that op — they do not leak into sibling ops on the same inode or fd.
+
+This is the common way to model a backing store that accepts dirty data into a cache but cannot commit it durably (quota exhausted, upstream pool full, replication offline). Put the fault rule on `fsync` and leave `write` unfaulted:
+
+```toml
+[[ops.fsync.faults]]
+op = "fsync"
+errno = "ENOSPC"
+rate = 1.0
+```
+
+With that config:
+
+- `write(2)` returns the full byte count on every call.
+- `fsync(2)` returns `ENOSPC` on every call — on the same fd, on the same inode, immediately after a successful write.
+
+Applications that treat a successful `write(2)` as a durability signal will miss the error; applications that check `fsync(2)` will see it. See [`examples/fsync_enospc.toml`](../examples/fsync_enospc.toml) for a complete working config.
+
 ## Determinism guarantees
 
 Given the same configuration (same `seed`) and the same sequence of operations:
