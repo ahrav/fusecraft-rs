@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, OpPolicy};
+use crate::config::{Config, FaultRule, LatencyProfile, OpPolicy};
 use crate::error::FsError;
 use crate::events::{Event, EventSink, NullEventSink, Outcome, now_unix_nanos};
 use crate::limiter::{BandwidthLimiter, BlockingLimiter};
@@ -26,10 +26,15 @@ pub use self::context::OpContext;
 mod context;
 
 /// Per-op resources owned by the engine.
+///
+/// When `policy.size_tier` is configured, `large_bandwidth` is pre-materialized
+/// at engine construction so the hot path does not allocate a limiter per call.
 struct OpResources {
     policy: OpPolicy,
     limiter: BlockingLimiter,
     bandwidth: Option<BandwidthLimiter>,
+    /// Pre-built bandwidth limiter for the large tier, if configured.
+    large_bandwidth: Option<BandwidthLimiter>,
 }
 
 /// The simulation engine.
@@ -55,12 +60,18 @@ impl SimEngine {
             let policy = config.ops.get(&op).cloned().unwrap_or_default();
             let limiter = BlockingLimiter::new(policy.concurrency_cap, policy.queue_cap);
             let bandwidth = policy.bandwidth.as_ref().map(BandwidthLimiter::new);
+            let large_bandwidth = policy
+                .size_tier
+                .as_ref()
+                .and_then(|t| t.large.bandwidth.as_ref())
+                .map(BandwidthLimiter::new);
             resources.insert(
                 op,
                 OpResources {
                     policy,
                     limiter,
                     bandwidth,
+                    large_bandwidth,
                 },
             );
         }
@@ -124,6 +135,14 @@ impl SimEngine {
         //    FUSE requests are bounded by kernel limits (typically ≤ 1 MiB),
         //    but clamp explicitly so the truncation from `usize` to `u32` is
         //    intentional rather than implicit if a caller ever exceeds u32.
+        //
+        //    Select the effective (latency, faults, bandwidth) triple based on
+        //    the size tier: if this op is Read or Write, a `size_tier` is
+        //    configured, and `ctx.len` exceeds the threshold, swap in the
+        //    large-tier profile. SampleKey is unchanged — tier selection is a
+        //    policy lookup, not a sampler input, so determinism is preserved.
+        let (latency_profile, faults, bandwidth) = select_tier(resources, ctx.op, ctx.len);
+
         let key = SampleKey {
             seed: self.seed,
             op: ctx.op,
@@ -132,11 +151,11 @@ impl SimEngine {
             len: ctx.len.min(u32::MAX as usize) as u32,
             seq,
         };
-        let fault_errno = sample_fault(&resources.policy.faults, key);
-        let latency_us = sample_latency_us(&resources.policy.latency, key);
+        let fault_errno = sample_fault(faults, key);
+        let latency_us = sample_latency_us(latency_profile, key);
 
         // 3. Bandwidth only applies to data ops with a configured profile.
-        let bandwidth_delay = match (&resources.bandwidth, ctx.op) {
+        let bandwidth_delay = match (bandwidth, ctx.op) {
             (Some(bw), FsOp::Read | FsOp::Write) => bw.reserve(ctx.len as u64),
             _ => Duration::ZERO,
         };
@@ -208,6 +227,39 @@ impl SimEngine {
     }
 }
 
+/// Pick the effective latency profile, fault rules, and bandwidth limiter for
+/// this call.
+///
+/// Returns the base-policy triple unless all three conditions hold:
+/// - `op` is `Read` or `Write`, and
+/// - `resources.policy.size_tier` is configured, and
+/// - `len` is strictly greater than `size_tier.threshold_bytes`.
+///
+/// Kept as a free function so it has no access to shared mutable state —
+/// matches the pure-sampler discipline used elsewhere on the hot path.
+fn select_tier(
+    resources: &OpResources,
+    op: FsOp,
+    len: usize,
+) -> (&LatencyProfile, &[FaultRule], Option<&BandwidthLimiter>) {
+    if matches!(op, FsOp::Read | FsOp::Write) {
+        if let Some(tier) = resources.policy.size_tier.as_ref() {
+            if (len as u64) > tier.threshold_bytes {
+                return (
+                    &tier.large.latency,
+                    &tier.large.faults,
+                    resources.large_bandwidth.as_ref(),
+                );
+            }
+        }
+    }
+    (
+        &resources.policy.latency,
+        &resources.policy.faults,
+        resources.bandwidth.as_ref(),
+    )
+}
+
 impl std::fmt::Debug for SimEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SimEngine")
@@ -220,7 +272,9 @@ impl std::fmt::Debug for SimEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BandwidthProfile, FaultRule, LatencyProfile, OpPolicy};
+    use crate::config::{
+        BandwidthProfile, FaultRule, LargeTierPolicy, LatencyProfile, OpPolicy, SizeTier,
+    };
     use parking_lot::Mutex;
 
     /// Collect events into a shared Vec for assertions.
@@ -457,5 +511,241 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].outcome, Outcome::Error));
         assert_eq!(events[0].errno, Some(libc::EAGAIN));
+    }
+
+    // --- Size-tier routing ---
+
+    /// Deterministic profile at a single fixed latency.
+    fn fixed_latency_profile(us: u64) -> LatencyProfile {
+        LatencyProfile {
+            base_us: us,
+            lognormal_median_us: 0.0,
+            lognormal_sigma: 0.0,
+            pareto_weight: 0.0,
+            pareto_xm_us: 1.0,
+            pareto_alpha: 1.5,
+            max_us: us.max(1_000_000),
+        }
+    }
+
+    #[test]
+    fn size_tier_routes_reads_below_threshold_to_base() {
+        // Base = 5ms, large = 200ms. A 500-byte read must hit the 5ms base.
+        let mut policy = zero_latency_policy();
+        policy.latency = fixed_latency_profile(5_000);
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(200_000),
+                bandwidth: None,
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+        let ctx = OpContext::data(FsOp::Read, 1, 0, 500);
+        let before = Instant::now();
+        engine.run_op(ctx, || Ok::<_, FsError>(())).unwrap();
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "expected base-tier latency (~5ms), got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_routes_reads_above_threshold_to_large() {
+        // Base = 0us, large = 50ms. A 2000-byte read must hit the 50ms tier.
+        let mut policy = zero_latency_policy();
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(50_000),
+                bandwidth: None,
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+        let ctx = OpContext::data(FsOp::Read, 1, 0, 2_000);
+        let before = Instant::now();
+        engine.run_op(ctx, || Ok::<_, FsError>(())).unwrap();
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "expected >=40ms large-tier latency, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_ignored_on_metadata_ops() {
+        // Open with huge ctx.len must not route to the large tier even if
+        // size_tier is (erroneously bypassing validation) set. Here we build
+        // the engine directly without going through validate() to prove that
+        // the engine's own routing gates on op kind.
+        let mut policy = zero_latency_policy();
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(250_000),
+                bandwidth: None,
+                faults: vec![FaultRule {
+                    op: FsOp::Open,
+                    errno: libc::EIO,
+                    rate: 1.0,
+                }],
+            },
+        });
+        let cfg = config_with(FsOp::Open, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+        let ctx = OpContext::data(FsOp::Open, 1, 0, 1_000_000);
+        let before = Instant::now();
+        engine.run_op(ctx, || Ok::<_, FsError>(())).unwrap();
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "metadata op must use base policy, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_bandwidth_throttles_large_reads() {
+        // Zero base latency. Large tier throttles at 1_000_000 B/s with a 100-byte
+        // burst. Small read (50 bytes) stays within burst and is fast. Large
+        // read (200_000 bytes) needs ~0.2s wait beyond burst.
+        let mut policy = zero_latency_policy();
+        policy.latency = fixed_latency_profile(0);
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(0),
+                bandwidth: Some(BandwidthProfile {
+                    bytes_per_sec: 1_000_000.0,
+                    burst_bytes: 100,
+                }),
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+
+        let before = Instant::now();
+        engine
+            .run_op(OpContext::data(FsOp::Read, 1, 0, 50), || {
+                Ok::<_, FsError>(())
+            })
+            .unwrap();
+        let small_elapsed = before.elapsed();
+        assert!(
+            small_elapsed < Duration::from_millis(50),
+            "small read must bypass large-tier bandwidth, got {small_elapsed:?}"
+        );
+
+        let before = Instant::now();
+        engine
+            .run_op(OpContext::data(FsOp::Read, 1, 0, 200_000), || {
+                Ok::<_, FsError>(())
+            })
+            .unwrap();
+        let large_elapsed = before.elapsed();
+        assert!(
+            large_elapsed >= Duration::from_millis(150),
+            "large read must be throttled (>=150ms), got {large_elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn size_tier_faults_apply_above_threshold() {
+        let mut policy = zero_latency_policy();
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(0),
+                bandwidth: None,
+                faults: vec![FaultRule {
+                    op: FsOp::Read,
+                    errno: libc::EIO,
+                    rate: 1.0,
+                }],
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+
+        // Small read (below threshold): no base fault → Ok.
+        let ok = engine
+            .run_op(OpContext::data(FsOp::Read, 1, 0, 100), || {
+                Ok::<u8, FsError>(42)
+            })
+            .unwrap();
+        assert_eq!(ok, 42);
+
+        // Large read (above threshold): large tier fires EIO.
+        let err = engine
+            .run_op(OpContext::data(FsOp::Read, 1, 0, 4096), || {
+                Ok::<u8, FsError>(42)
+            })
+            .unwrap_err();
+        match err {
+            FsError::Errno(e) => assert_eq!(e, libc::EIO),
+            other => panic!("expected EIO, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn size_tier_uses_inherited_concurrency_cap() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        // Single-slot limiter. A large-tier read that sleeps on latency must
+        // block a second read (small or large) from acquiring the slot, proving
+        // the limiter is shared across tiers.
+        let mut policy = zero_latency_policy();
+        policy.concurrency_cap = 1;
+        policy.queue_cap = 4;
+        policy.latency = fixed_latency_profile(0);
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(150_000), // 150ms
+                bandwidth: None,
+                faults: Vec::new(),
+            },
+        });
+        let cfg = config_with(FsOp::Read, policy);
+        let engine = Arc::new(SimEngine::new_without_events(&cfg));
+
+        let barrier = Arc::new(Barrier::new(2));
+        let e1 = Arc::clone(&engine);
+        let b1 = Arc::clone(&barrier);
+        let large_handle = thread::spawn(move || {
+            b1.wait();
+            e1.run_op(OpContext::data(FsOp::Read, 1, 0, 10_000), || {
+                Ok::<_, FsError>(())
+            })
+            .unwrap();
+        });
+
+        let e2 = Arc::clone(&engine);
+        let b2 = Arc::clone(&barrier);
+        let small_handle = thread::spawn(move || {
+            b2.wait();
+            // Give the large op a head start to win the limiter slot.
+            thread::sleep(Duration::from_millis(10));
+            let before = Instant::now();
+            e2.run_op(OpContext::data(FsOp::Read, 1, 0, 100), || {
+                Ok::<_, FsError>(())
+            })
+            .unwrap();
+            before.elapsed()
+        });
+
+        large_handle.join().unwrap();
+        let small_wait = small_handle.join().unwrap();
+        assert!(
+            small_wait >= Duration::from_millis(80),
+            "small read should have been blocked by the large-tier op holding the \
+             single limiter slot (>=80ms), got {small_wait:?}"
+        );
     }
 }

@@ -506,3 +506,210 @@ fn validate_latency(latency: &LatencyProfile, prefix: &str) -> Result<(), FsErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_large_tier() -> LargeTierPolicy {
+        LargeTierPolicy {
+            latency: LatencyProfile::default(),
+            bandwidth: None,
+            faults: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_threshold() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 0,
+                    large: make_large_tier(),
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("threshold_bytes"),
+                    "expected threshold_bytes error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_size_tier_on_metadata_op() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Open,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 1024,
+                    large: make_large_tier(),
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("size_tier") && msg.contains("Read or Write"),
+                    "expected size_tier on-metadata error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_size_tier_on_read() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 128 * 1024,
+                    large: make_large_tier(),
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        cfg.validate().expect("size_tier on Read must validate");
+    }
+
+    #[test]
+    fn validate_accepts_size_tier_on_write() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Write,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 128 * 1024,
+                    large: make_large_tier(),
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        cfg.validate().expect("size_tier on Write must validate");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_large_tier_latency() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 1024,
+                    large: LargeTierPolicy {
+                        latency: LatencyProfile {
+                            base_us: 1000,
+                            max_us: 10, // max < base — invalid.
+                            ..LatencyProfile::default()
+                        },
+                        bandwidth: None,
+                        faults: Vec::new(),
+                    },
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("size_tier.large.latency.max_us"),
+                    "expected size_tier latency error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_large_tier_fault_rate() {
+        let mut cfg = Config::default();
+        cfg.ops.insert(
+            FsOp::Read,
+            OpPolicy {
+                size_tier: Some(SizeTier {
+                    threshold_bytes: 1024,
+                    large: LargeTierPolicy {
+                        latency: LatencyProfile::default(),
+                        bandwidth: None,
+                        faults: vec![FaultRule {
+                            op: FsOp::Read,
+                            errno: libc::EIO,
+                            rate: 1.5,
+                        }],
+                    },
+                }),
+                ..OpPolicy::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            FsError::Config(msg) => {
+                assert!(
+                    msg.contains("size_tier.large.faults") && msg.contains("rate"),
+                    "expected size_tier fault rate error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn size_tier_toml_round_trip() {
+        // Build a Config with a size_tier on Read and verify serialize ↔
+        // parse ↔ validate all agree.
+        let toml_str = r#"
+seed = 777
+
+[ops.read]
+concurrency_cap = 8
+
+[ops.read.latency]
+base_us = 10
+
+[ops.read.size_tier]
+threshold_bytes = 131072
+
+[ops.read.size_tier.large.latency]
+base_us = 5000
+max_us = 100000
+
+[ops.read.size_tier.large.bandwidth]
+mib_per_sec = 25.0
+burst_bytes = 65536
+
+[[ops.read.size_tier.large.faults]]
+op = "read"
+errno = "EIO"
+rate = 0.01
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse size_tier TOML");
+        cfg.validate().expect("size_tier config must validate");
+
+        let read_policy = cfg.ops.get(&FsOp::Read).expect("read policy");
+        let tier = read_policy.size_tier.as_ref().expect("size_tier set");
+        assert_eq!(tier.threshold_bytes, 131_072);
+        assert_eq!(tier.large.latency.base_us, 5_000);
+        assert_eq!(tier.large.latency.max_us, 100_000);
+        let bw = tier.large.bandwidth.as_ref().expect("bandwidth set");
+        let expected_bps = 25.0 * 1024.0 * 1024.0;
+        assert!((bw.bytes_per_sec - expected_bps).abs() < 1.0);
+        assert_eq!(bw.burst_bytes, 65_536);
+        assert_eq!(tier.large.faults.len(), 1);
+        assert_eq!(tier.large.faults[0].errno, libc::EIO);
+        assert!((tier.large.faults[0].rate - 0.01).abs() < f64::EPSILON);
+    }
+}
