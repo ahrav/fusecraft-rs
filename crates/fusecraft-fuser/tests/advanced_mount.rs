@@ -8,6 +8,14 @@
 //! Like the other FUSE integration tests they are gated on the `fuse-tests`
 //! feature and Linux with `/dev/fuse`. Without both, the tests compile and
 //! skip at runtime.
+//!
+//! The test file itself is `#![cfg(unix)]`-gated because it uses Unix-only
+//! APIs directly (`libc::statvfs`, `std::os::unix::ffi::OsStrExt::as_bytes`).
+//! The rest of the `fusecraft-fuser` crate is transitively Unix-only through
+//! the `fuser` dependency, but stating the constraint here makes the
+//! compile-time contract explicit and keeps rustdoc happy on non-Unix hosts.
+
+#![cfg(unix)]
 
 mod common;
 
@@ -300,6 +308,67 @@ fn jsonl_event_sink_writes_one_event_per_op() {
             "expected op {expected:?} in JSONL events, got: {ops_seen:?}"
         );
     }
+
+    // Verify the core "one event per op" invariant the test name promises.
+    //
+    // `SimEngine::run_op` calls `AtomicU64::fetch_add(1, ...)` exactly once
+    // per invocation, passes the returned `seq` into the sample key, and
+    // emits exactly one event before releasing the limiter slot. Therefore,
+    // if the sink writes one event per `run_op` call, the `seq` values
+    // across all emitted events must form a contiguous range starting at 0
+    // (no holes → no dropped events; no duplicates → no double-emits).
+    //
+    // A previous version of this test only checked set membership of op
+    // names, which collapsed duplicated events and could not catch a sink
+    // that emitted the same event twice. The seq-density check below is
+    // the strongest form of that invariant that is observable from the
+    // JSONL output alone.
+    let mut seqs: Vec<u64> = lines
+        .iter()
+        .filter_map(|l| common::json_field(l, "seq")?.parse::<u64>().ok())
+        .collect();
+    assert_eq!(
+        seqs.len(),
+        lines.len(),
+        "every JSONL line must contain a parseable `seq`; lines={lines:?}"
+    );
+    seqs.sort_unstable();
+    for (i, s) in seqs.iter().enumerate() {
+        assert_eq!(
+            *s as usize, i,
+            "seq gap or duplicate at position {i}: seq={s}, seqs={seqs:?} — \
+             this violates the one-event-per-op invariant"
+        );
+    }
+
+    // Ops driven *exactly once* by the workload must each show up *exactly
+    // once*. `open` is the open(2) syscall on object 0 (single OpenOptions),
+    // and `release` is its matching close (single `drop(f)`). The kernel
+    // never splits either into multiple FUSE requests. `read` is left as
+    // set-membership above because some kernels may split a read into
+    // multiple FUSE READ requests when their max_read limit is below the
+    // user-space buffer size.
+    let mut op_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in &lines {
+        if let Some(op) = common::json_field(line, "op") {
+            let key: &'static str = match op {
+                "open" => "open",
+                "release" => "release",
+                _ => continue,
+            };
+            *op_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    assert_eq!(
+        op_counts.get("open").copied().unwrap_or_default(),
+        1,
+        "workload opens object 0 exactly once; op_counts={op_counts:?}"
+    );
+    assert_eq!(
+        op_counts.get("release").copied().unwrap_or_default(),
+        1,
+        "workload releases object 0 exactly once; op_counts={op_counts:?}"
+    );
 }
 
 #[test]
