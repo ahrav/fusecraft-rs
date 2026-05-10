@@ -11,6 +11,10 @@ keywords = ["fuse", "filesystem", "simulator", "cli", "testing"]
 categories = ["filesystem", "simulation", "command-line-utilities"]
 documentation = "https://docs.rs/fusecraft-cli"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [[bin]]
 name = "fusecraft"
 path = "src/main.rs"

@@ -12,7 +12,7 @@ use fusecraft_core::config::{
 };
 use fusecraft_core::content::DeterministicContent;
 use fusecraft_core::engine::SimEngine;
-use fusecraft_core::events::NullEventSink;
+use fusecraft_core::events::{EventSink, NullEventSink};
 use fusecraft_core::namespace::FlatObjectNamespace;
 use fusecraft_core::op::FsOp;
 
@@ -104,6 +104,76 @@ pub fn default_test_config() -> Config {
 /// owning the mount point. Callers must keep both alive for the duration of
 /// the test.
 pub fn mount_test_fs(config: &Config) -> (MountHandle, tempfile::TempDir) {
+    mount_test_fs_with_sink(config, Arc::new(NullEventSink))
+}
+
+/// Mount a `FaultFs` under a fresh tempdir using the given config and a custom
+/// [`EventSink`].
+///
+/// Used by tests that need to observe the event stream emitted by the engine
+/// (e.g. JSONL replay or per-op accounting). `mount_test_fs` delegates here
+/// with [`NullEventSink`] as the default.
+#[allow(dead_code)]
+pub fn mount_test_fs_with_sink(
+    config: &Config,
+    sink: Arc<dyn EventSink>,
+) -> (MountHandle, tempfile::TempDir) {
+    try_mount_test_fs_with_sink(config, sink).expect("spawn_mount")
+}
+
+/// Fallible variant that returns the underlying `FsError` when the mount
+/// fails. Tests use this to tolerate environment-specific mount rejections
+/// (e.g. `fusermount3` refusing unknown options) without panicking.
+#[allow(dead_code)]
+pub fn try_mount_test_fs_with_sink(
+    config: &Config,
+    sink: Arc<dyn EventSink>,
+) -> Result<(MountHandle, tempfile::TempDir), fusecraft_core::error::FsError> {
+    let mount_dir = tempdir();
+    let engine = Arc::new(SimEngine::new(config, sink));
+    let namespace = Arc::new(FlatObjectNamespace::new(&config.files));
+    let content = Arc::new(DeterministicContent::new(
+        config.seed,
+        config.files.file_size_bytes,
+    ));
+    let fs = FaultFs::new(engine, namespace, content);
+    let opts = FuserMountOptions::from_mount_config(&config.mount);
+    let handle = spawn_mount(fs, mount_dir.path(), &opts)?;
+    // Poll the mount point until the kernel publishes the mounted filesystem:
+    // without a real wait, races let the test read the empty underlying
+    // tempdir instead of the mount. A fixed sleep would also be flaky on
+    // slow CI hosts, so we poll for the `objects` entry that the
+    // `FlatObjectNamespace` guarantees at root.
+    wait_for_mount(mount_dir.path());
+    Ok((handle, mount_dir))
+}
+
+/// Drop-to-unmount guard wrapping a raw `fuser::BackgroundSession`.
+///
+/// `MountHandle` in `fusecraft-fuser` is `pub` but its field is private, so
+/// tests that need to construct a session with non-default `fuser::Config`
+/// (e.g. `n_threads`) can't route through `MountHandle`. This helper type is
+/// the test-only twin used by [`mount_multi_threaded_fs`].
+#[allow(dead_code)]
+pub struct RawMountHandle {
+    _session: fuser::BackgroundSession,
+}
+
+/// Mount a `FaultFs` with multiple FUSE worker threads.
+///
+/// The public [`fusecraft_fuser::mount`]/[`fusecraft_fuser::spawn_mount`]
+/// helpers plumb a [`FuserMountOptions`] which leaves `fuser::Config::n_threads`
+/// at `None` (fuser defaults to a single worker). Concurrency tests need two or
+/// more worker threads so that multiple FUSE requests can really be in flight
+/// at the engine layer at the same time; this helper bypasses the adapter's
+/// default and builds the `fuser::Config` directly.
+#[allow(dead_code)]
+pub fn mount_multi_threaded_fs(
+    config: &Config,
+    n_threads: usize,
+) -> (RawMountHandle, tempfile::TempDir) {
+    use fuser::{MountOption, SessionACL};
+
     let mount_dir = tempdir();
     let engine = Arc::new(SimEngine::new(config, Arc::new(NullEventSink)));
     let namespace = Arc::new(FlatObjectNamespace::new(&config.files));
@@ -112,15 +182,32 @@ pub fn mount_test_fs(config: &Config) -> (MountHandle, tempfile::TempDir) {
         config.files.file_size_bytes,
     ));
     let fs = FaultFs::new(engine, namespace, content);
-    let opts = FuserMountOptions::from_mount_config(&config.mount);
-    let handle = spawn_mount(fs, mount_dir.path(), &opts).expect("spawn_mount");
-    // Poll the mount point until the kernel publishes the mounted filesystem:
-    // without a real wait, races let the test read the empty underlying
-    // tempdir instead of the mount. A fixed sleep would also be flaky on
-    // slow CI hosts, so we poll for the `objects` entry that the
-    // `FlatObjectNamespace` guarantees at root.
+
+    // Replicate just enough of `FuserMountOptions::to_fuser_config` to preserve
+    // parity with the real adapter, but with `n_threads` set to the test's
+    // chosen value. We intentionally avoid `direct_io` and `auto_unmount` here
+    // — neither is needed to observe concurrency behaviour.
+    let mut mount_options = Vec::new();
+    mount_options.push(MountOption::FSName(config.mount.fs_name.clone()));
+    mount_options.push(MountOption::Subtype(config.mount.subtype.clone()));
+    if config.mount.default_permissions {
+        mount_options.push(MountOption::DefaultPermissions);
+    }
+    if config.mount.read_only {
+        mount_options.push(MountOption::RO);
+    } else {
+        mount_options.push(MountOption::RW);
+    }
+
+    let mut fuser_config = fuser::Config::default();
+    fuser_config.mount_options = mount_options;
+    fuser_config.acl = SessionACL::Owner;
+    fuser_config.n_threads = Some(n_threads);
+
+    let session = fuser::spawn_mount2(fs, mount_dir.path(), &fuser_config)
+        .expect("spawn_mount2 with n_threads");
     wait_for_mount(mount_dir.path());
-    (handle, mount_dir)
+    (RawMountHandle { _session: session }, mount_dir)
 }
 
 /// Poll until the FUSE mount point reports an `objects` child, or give up
@@ -171,4 +258,44 @@ pub fn object_path(mount_dir: &Path, index: u64) -> PathBuf {
     mount_dir
         .join("objects")
         .join(FlatObjectNamespace::index_to_name(index))
+}
+
+/// Read a JSONL file and return each non-empty line as its raw string.
+///
+/// Parsing into `serde_json::Value` would require adding `serde_json` as a
+/// dev-dependency of `fusecraft-fuser`, which is outside this test file's
+/// ownership. Callers perform lightweight field checks via [`json_field`]
+/// instead. Trailing empty lines are skipped.
+#[allow(dead_code)]
+pub fn read_jsonl_events(path: &Path) -> Vec<String> {
+    let contents = std::fs::read_to_string(path).expect("read jsonl file");
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.to_owned())
+        .collect()
+}
+
+/// Extract the string value of a top-level JSON field from a single JSONL
+/// line. Returns `None` if the field is absent or the line isn't a simple
+/// JSON object of the shape produced by `JsonlEventSink`.
+///
+/// Handles both string (`"op":"read"`) and numeric (`"seq":42`) values and
+/// returns the raw substring (unquoted for strings, verbatim for numbers).
+/// This is a deliberately minimal parser tuned to the `Event` serialization
+/// shape in `fusecraft-core::events`, not a general JSON reader.
+#[allow(dead_code)]
+pub fn json_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        // String value: read until the next unescaped quote.
+        let end = stripped.find('"')?;
+        Some(&stripped[..end])
+    } else {
+        // Numeric / boolean / null value: read until the next `,` or `}`.
+        let end = rest.find([',', '}'])?;
+        Some(rest[..end].trim())
+    }
 }

@@ -111,6 +111,14 @@ cargo test --workspace
 
 CI enforces all three gates with `-D warnings`.
 
+## Publishing
+
+See [`docs/publishing.md`](docs/publishing.md) for the release workflow:
+publish order (`fusecraft-core` → `fusecraft-fuser` → `fusecraft-cli`),
+version bump procedure, and local verification steps. Once the crates are
+on crates.io, end users will be able to install the binary with
+`cargo install fusecraft-cli`.
+
 ## License
 
 MIT. See [`LICENSE-MIT`](LICENSE-MIT).
