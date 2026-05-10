@@ -186,6 +186,12 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
         // the true byte count: `ctx.len` feeds bandwidth throttling, the
         // sampler key, and event/metric payloads, and short tail reads should
         // not be charged as full-size reads.
+        //
+        // Size-tier routing is different — it should follow the caller's
+        // original intent so a 1 MiB read near EOF with only a small tail
+        // readable still routes to the large tier. We therefore carry the
+        // unclamped `requested` size in `ctx.requested_len` for the engine's
+        // tier selection.
         let requested = size as usize;
         let file_len = content.file_len(ino.0);
         let readable = if offset >= file_len {
@@ -193,7 +199,8 @@ impl<N: NamespaceModel, C: ContentModel> Filesystem for FaultFs<N, C> {
         } else {
             ((file_len - offset) as usize).min(requested)
         };
-        let ctx = OpContext::data(FsOp::Read, ino.0, offset, readable);
+        let ctx =
+            OpContext::data(FsOp::Read, ino.0, offset, readable).with_requested_len(requested);
 
         match self.engine.run_op(ctx, move || {
             if readable == 0 {

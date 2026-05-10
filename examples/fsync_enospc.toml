@@ -1,0 +1,88 @@
+# Fsync-isolated ENOSPC: writes succeed, but fsync on the same fd always
+# returns ENOSPC. Demonstrates that every FsOp has its own policy — a fault
+# rule on `[[ops.fsync.faults]]` does not affect `write` on the same inode.
+#
+# Scenario:
+#   - Writes are accepted at full byte count (write_mode = "discard").
+#   - Fsync fails with ENOSPC on every call (rate = 1.0).
+#   - This mirrors a backing store that accepts dirty data into a cache but
+#     cannot commit it durably (quota exhausted, upstream pool full, etc).
+#
+# Use this config to exercise application code that must:
+#   - Detect unsynced-write failures and surface them to the caller.
+#   - Avoid treating successful write(2) as a durability signal.
+#   - Retry or escalate when fsync reports out-of-space mid-stream.
+seed = 5150
+
+[mount]
+auto_unmount = false
+default_permissions = true
+read_only = false
+direct_io = false
+
+[files]
+inode_count = 100
+file_size_bytes = 131072
+root_layout = "flat"
+write_mode = "discard"
+
+[ops.open]
+concurrency_cap = 32
+queue_cap = 64
+
+[ops.open.latency]
+base_us = 50
+lognormal_median_us = 80.0
+lognormal_sigma = 0.3
+max_us = 200000
+
+[ops.write]
+concurrency_cap = 32
+queue_cap = 64
+
+# Writes complete cleanly — no fault rule, so write(2) always returns the
+# full byte count.
+[ops.write.latency]
+base_us = 100
+lognormal_median_us = 200.0
+lognormal_sigma = 0.4
+max_us = 500000
+
+[ops.fsync]
+concurrency_cap = 16
+queue_cap = 32
+
+[ops.fsync.latency]
+base_us = 500
+lognormal_median_us = 1000.0
+lognormal_sigma = 0.4
+max_us = 500000
+
+# Every fsync returns ENOSPC. Because faults are declared per-op, this does
+# not leak into write(2) on the same fd — the preceding write succeeds and
+# only the explicit sync point reports the error.
+[[ops.fsync.faults]]
+op = "fsync"
+errno = "ENOSPC"
+rate = 1.0
+
+[ops.flush]
+concurrency_cap = 32
+
+[ops.flush.latency]
+base_us = 20
+lognormal_median_us = 50.0
+lognormal_sigma = 0.3
+max_us = 200000
+
+[ops.release]
+concurrency_cap = 64
+
+[ops.release.latency]
+base_us = 10
+lognormal_median_us = 30.0
+lognormal_sigma = 0.2
+max_us = 100000
+
+[metrics]
+jsonl_path = "/tmp/fusecraft-fsync-enospc.jsonl"

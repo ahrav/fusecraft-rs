@@ -86,6 +86,56 @@ Fault injection rules. Multiple rules can target the same operation.
 | `errno` | `string` | *(required)* | Error to inject: `EIO`, `ENOENT`, `ESTALE`, `ENOSPC`, `EAGAIN`, or `EINTR` |
 | `rate` | `f64` | *(required)* | Probability of triggering (0.0 to 1.0, must be finite) |
 
+## `[ops.<op>.size_tier]`
+
+Optional size-keyed alternate policy. Only valid on `read` and `write` — validation rejects `size_tier` on metadata ops. When an op's originally requested length (as supplied by the caller, not the possibly-clamped effective length — short tail reads near EOF still route by caller intent) exceeds `threshold_bytes`, the engine swaps in the large-tier latency, bandwidth, and fault rules in place of the base-policy values. Requests at or below the threshold use the base policy unchanged (the comparison is strict `>`).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `threshold_bytes` | `u64` | *(required)* | Length in bytes above which requests route to the large tier. Must be > 0 — a zero threshold is equivalent to setting the base policy directly. |
+| `large` | table | *(required)* | The alternate latency / bandwidth / faults triple applied to large requests. |
+
+### `[ops.<op>.size_tier.large]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `latency` | table | *(see `[ops.<op>.latency]` above)* | Latency profile for large requests. Same shape as the base latency table. |
+| `bandwidth` | table | *(none)* | Optional bandwidth profile for large requests. Same shape as the base bandwidth table. |
+| `faults` | array of tables | *(empty)* | Fault rules for large requests. Same shape as the base faults array. |
+
+### Concurrency and queueing are shared, not tiered
+
+`concurrency_cap` and `queue_cap` live only on the base policy — they are intentionally absent from `size_tier.large`. The engine runs a single `BlockingLimiter` queue per op, and the tier split happens *after* limiter admission. Splitting concurrency across tiers would require two queues per op and would break the single-queue invariant the limiter is built on. Both small and large requests therefore share the same admission limit.
+
+### Worked example: 128 KiB split
+
+The following config models a backend where small reads (<= 128 KiB) are served from a fast local cache and large reads spill to a slow remote tier with a ~850 MiB/s ceiling:
+
+```toml
+[ops.read]
+concurrency_cap = 64
+queue_cap = 128
+
+[ops.read.latency]
+base_us = 2000          # 2 ms cache-hit latency
+
+[ops.read.size_tier]
+threshold_bytes = 131072   # 128 KiB
+
+[ops.read.size_tier.large.latency]
+base_us = 50000         # 50 ms remote-tier base latency
+pareto_weight = 0.02
+pareto_xm_us = 50000.0
+pareto_alpha = 1.3
+max_us = 2000000
+
+[ops.read.size_tier.large.bandwidth]
+mib_per_sec = 850.0
+burst_bytes = 1048576
+```
+
+A full working example lives at [`examples/size_tiered.toml`](../examples/size_tiered.toml).
+
 ## `[metrics]`
 
 | Key | Type | Default | Description |
@@ -106,6 +156,11 @@ Fault injection rules. Multiple rules can target the same operation.
 - `lognormal_sigma` >= 0
 - All float fields must be finite
 - `rate` in [0.0, 1.0] and finite for every fault rule
+- Each fault rule's `op` must match the enclosing `[ops.<op>]` section — a mismatch would silently never fire at runtime (the sampler filters by op) and is therefore rejected at load time
+- `mib_per_sec` must be finite for every bandwidth profile
+- `size_tier` is only permitted on `read` and `write` ops
+- `size_tier.threshold_bytes` > 0
+- All latency, bandwidth, and fault invariants above apply to `size_tier.large` as well
 
 ## Examples
 
