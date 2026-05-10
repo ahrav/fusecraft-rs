@@ -1,0 +1,50 @@
+# Read-heavy workload: tunes read latency and bandwidth to simulate
+# a remote object store with occasional tail latency spikes.
+seed = 100
+
+[mount]
+read_only = true
+direct_io = true
+
+[files]
+inode_count = 10000
+file_size_bytes = 1048576
+root_layout = "flat"
+
+[ops.read]
+concurrency_cap = 128
+queue_cap = 256
+
+[ops.read.latency]
+base_us = 200
+lognormal_median_us = 500.0
+lognormal_sigma = 0.6
+pareto_weight = 0.03
+pareto_xm_us = 10000.0
+pareto_alpha = 1.2
+max_us = 2000000
+
+[ops.read.bandwidth]
+mib_per_sec = 200.0
+burst_bytes = 2097152
+
+[ops.getattr]
+concurrency_cap = 64
+
+[ops.getattr.latency]
+base_us = 50
+lognormal_median_us = 80.0
+lognormal_sigma = 0.3
+max_us = 100000
+
+[ops.lookup]
+concurrency_cap = 64
+
+[ops.lookup.latency]
+base_us = 50
+lognormal_median_us = 80.0
+lognormal_sigma = 0.3
+max_us = 100000
+
+[metrics]
+jsonl_path = "/tmp/fusecraft-read-heavy.jsonl"

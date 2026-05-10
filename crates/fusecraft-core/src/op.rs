@@ -16,11 +16,12 @@ pub enum FsOp {
     Fsync,
     Readdir,
     Statfs,
+    Access,
 }
 
 impl FsOp {
     /// All defined operation kinds.
-    pub const ALL: [FsOp; 10] = [
+    pub const ALL: [FsOp; 11] = [
         FsOp::Lookup,
         FsOp::GetAttr,
         FsOp::Open,
@@ -31,6 +32,7 @@ impl FsOp {
         FsOp::Fsync,
         FsOp::Readdir,
         FsOp::Statfs,
+        FsOp::Access,
     ];
 
     /// Return the string representation of this operation.
@@ -46,6 +48,7 @@ impl FsOp {
             FsOp::Fsync => "fsync",
             FsOp::Readdir => "readdir",
             FsOp::Statfs => "statfs",
+            FsOp::Access => "access",
         }
     }
 }

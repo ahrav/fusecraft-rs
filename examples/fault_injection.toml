@@ -1,0 +1,78 @@
+# Fault injection: exercises application error-handling paths by injecting
+# transient and persistent errors at configurable rates.
+seed = 7777
+
+[files]
+inode_count = 500
+file_size_bytes = 65536
+
+[ops.read]
+concurrency_cap = 32
+queue_cap = 64
+
+[ops.read.latency]
+base_us = 100
+lognormal_median_us = 150.0
+lognormal_sigma = 0.4
+max_us = 500000
+
+[[ops.read.faults]]
+op = "read"
+errno = "EIO"
+rate = 0.05
+
+[[ops.read.faults]]
+op = "read"
+errno = "EAGAIN"
+rate = 0.02
+
+[ops.write]
+concurrency_cap = 16
+queue_cap = 32
+
+[ops.write.latency]
+base_us = 200
+lognormal_median_us = 300.0
+lognormal_sigma = 0.5
+max_us = 1000000
+
+[[ops.write.faults]]
+op = "write"
+errno = "ENOSPC"
+rate = 0.1
+
+[[ops.write.faults]]
+op = "write"
+errno = "EIO"
+rate = 0.01
+
+[ops.open]
+concurrency_cap = 32
+
+[ops.open.latency]
+base_us = 50
+lognormal_median_us = 100.0
+lognormal_sigma = 0.3
+max_us = 200000
+
+[[ops.open.faults]]
+op = "open"
+errno = "ENOENT"
+rate = 0.03
+
+[ops.fsync]
+concurrency_cap = 8
+
+[ops.fsync.latency]
+base_us = 500
+lognormal_median_us = 1000.0
+lognormal_sigma = 0.7
+max_us = 5000000
+
+[[ops.fsync.faults]]
+op = "fsync"
+errno = "EIO"
+rate = 0.02
+
+[metrics]
+jsonl_path = "/tmp/fusecraft-faults.jsonl"
