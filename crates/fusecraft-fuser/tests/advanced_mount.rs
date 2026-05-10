@@ -282,7 +282,19 @@ fn jsonl_event_sink_writes_one_event_per_op() {
         .filter_map(|l| common::json_field(l, "op").map(|s| s.to_owned()))
         .collect();
     // FsOp serializes in lowercase (see `#[serde(rename_all = "lowercase")]`).
-    for expected in ["open", "read", "getattr", "release"] {
+    //
+    // Only the ops the test directly drives are required:
+    //   - `open`     (from `OpenOptions::open`)
+    //   - `read`     (from `f.read`)
+    //   - `release`  (from `drop(f)`)
+    //
+    // `getattr` was intentionally removed from this set. `FaultFs::lookup`
+    // returns attributes with a nonzero entry TTL (1s by default), so many
+    // Linux kernels satisfy the downstream `std::fs::metadata` call from
+    // lookup cache without issuing a distinct `getattr` FUSE request. That
+    // would make this assertion a host/kernel-dependent coin-flip; we assert
+    // only on ops the workload is guaranteed to emit.
+    for expected in ["open", "read", "release"] {
         assert!(
             ops_seen.contains(expected),
             "expected op {expected:?} in JSONL events, got: {ops_seen:?}"

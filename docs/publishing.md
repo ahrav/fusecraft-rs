@@ -84,6 +84,21 @@ cargo publish -p fusecraft-fuser
 cargo publish -p fusecraft-cli
 ```
 
-If a publish fails partway through, do not retry out of order. Fix the
-failing crate, bump the patch version for that crate and any crates that
-have not yet been published, and restart from the first unpublished crate.
+If a publish fails partway through, do not retry out of order. The lockstep
+version invariant above (all three crates share the same version) must hold
+on crates.io too — once `fusecraft-core 0.1.0` is published, it is
+immutable, so a later failure in `fusecraft-fuser` or `fusecraft-cli`
+cannot be recovered by re-publishing `fusecraft-core 0.1.0`.
+
+To recover:
+
+1. Fix the failing crate.
+2. Bump **all three** crates to the next patch version (e.g., `0.1.0` →
+   `0.1.1`) per the "Version bumps" section, including the path+version
+   `version` field in `fusecraft-fuser` and `fusecraft-cli`'s dependency
+   on `fusecraft-core`.
+3. Re-run the local verification sequence.
+4. Restart publishing from `fusecraft-core` in the usual order. The
+   already-published lower version (e.g., `0.1.0 fusecraft-core`) stays
+   on crates.io and becomes a "dead" release; that is fine — crates.io
+   intentionally forbids yanking-and-reusing the same version number.
