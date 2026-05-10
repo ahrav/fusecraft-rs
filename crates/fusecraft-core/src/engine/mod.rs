@@ -703,13 +703,63 @@ mod tests {
     }
 
     #[test]
+    fn size_tier_faults_apply_above_threshold_for_writes() {
+        // Mirrors `size_tier_faults_apply_above_threshold` for FsOp::Write to
+        // guard against a regression in the write branch of `select_tier`.
+        let mut policy = zero_latency_policy();
+        policy.size_tier = Some(SizeTier {
+            threshold_bytes: 1024,
+            large: LargeTierPolicy {
+                latency: fixed_latency_profile(0),
+                bandwidth: None,
+                faults: vec![FaultRule {
+                    op: FsOp::Write,
+                    errno: libc::ENOSPC,
+                    rate: 1.0,
+                }],
+            },
+        });
+        let cfg = config_with(FsOp::Write, policy);
+        let engine = SimEngine::new_without_events(&cfg);
+
+        // Small write (below threshold): no base fault → Ok.
+        let ok = engine
+            .run_op(OpContext::data(FsOp::Write, 1, 0, 100), || {
+                Ok::<u8, FsError>(7)
+            })
+            .unwrap();
+        assert_eq!(ok, 7);
+
+        // Large write (above threshold): large tier fires ENOSPC.
+        let err = engine
+            .run_op(OpContext::data(FsOp::Write, 1, 0, 4096), || {
+                Ok::<u8, FsError>(7)
+            })
+            .unwrap_err();
+        match err {
+            FsError::Errno(e) => assert_eq!(e, libc::ENOSPC),
+            other => panic!("expected ENOSPC, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn size_tier_uses_inherited_concurrency_cap() {
-        use std::sync::Barrier;
+        use std::sync::mpsc;
         use std::thread;
 
-        // Single-slot limiter. A large-tier read that sleeps on latency must
-        // block a second read (small or large) from acquiring the slot, proving
-        // the limiter is shared across tiers.
+        // Single-slot limiter. A large-tier read that is actively holding
+        // the slot must block a second read from acquiring it, proving the
+        // limiter is shared across tiers.
+        //
+        // Sequencing: the large thread signals through `slot_acquired_tx`
+        // from inside its body closure, which only runs after `run_op` has
+        // acquired the limiter slot (step 5 of the 7-step lifecycle). The
+        // small thread waits on that signal before calling `run_op`, so the
+        // test cannot race: the large op is *guaranteed* to hold the slot
+        // when the small op starts queueing. The hold time comes from a
+        // `thread::sleep` inside the large body (not from injected latency,
+        // which runs *before* the body signals) so the small thread observes
+        // a real queue wait.
         let mut policy = zero_latency_policy();
         policy.concurrency_cap = 1;
         policy.queue_cap = 4;
@@ -717,7 +767,7 @@ mod tests {
         policy.size_tier = Some(SizeTier {
             threshold_bytes: 1024,
             large: LargeTierPolicy {
-                latency: fixed_latency_profile(150_000), // 150ms
+                latency: fixed_latency_profile(0),
                 bandwidth: None,
                 faults: Vec::new(),
             },
@@ -725,23 +775,23 @@ mod tests {
         let cfg = config_with(FsOp::Read, policy);
         let engine = Arc::new(SimEngine::new_without_events(&cfg));
 
-        let barrier = Arc::new(Barrier::new(2));
+        let (slot_acquired_tx, slot_acquired_rx) = mpsc::channel::<()>();
         let e1 = Arc::clone(&engine);
-        let b1 = Arc::clone(&barrier);
         let large_handle = thread::spawn(move || {
-            b1.wait();
-            e1.run_op(OpContext::data(FsOp::Read, 1, 0, 10_000), || {
+            e1.run_op(OpContext::data(FsOp::Read, 1, 0, 10_000), move || {
+                // The limiter slot is held (body runs after acquire + latency
+                // sleep). Signal the small thread, then hold the slot for
+                // 150ms so the small thread observes a real queue wait.
+                let _ = slot_acquired_tx.send(());
+                thread::sleep(Duration::from_millis(150));
                 Ok::<_, FsError>(())
             })
             .unwrap();
         });
 
         let e2 = Arc::clone(&engine);
-        let b2 = Arc::clone(&barrier);
         let small_handle = thread::spawn(move || {
-            b2.wait();
-            // Give the large op a head start to win the limiter slot.
-            thread::sleep(Duration::from_millis(10));
+            slot_acquired_rx.recv().expect("large signalled slot held");
             let before = Instant::now();
             e2.run_op(OpContext::data(FsOp::Read, 1, 0, 100), || {
                 Ok::<_, FsError>(())
@@ -754,8 +804,8 @@ mod tests {
         let small_wait = small_handle.join().unwrap();
         assert!(
             small_wait >= Duration::from_millis(80),
-            "small read should have been blocked by the large-tier op holding the \
-             single limiter slot (>=80ms), got {small_wait:?}"
+            "small read should have been blocked by the large-tier op holding \
+             the single limiter slot (>=80ms), got {small_wait:?}"
         );
     }
 
